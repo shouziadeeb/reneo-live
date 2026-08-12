@@ -2,11 +2,13 @@ import { Link, NavLink } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { useAuth } from '../hooks/useAuth'
 import { useCart } from '../hooks/useCart'
+import { useNetworkStatus } from '../hooks/useNetworkStatus'
 import { Button } from './ui'
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { profile, signOut } = useAuth()
   const { itemCount } = useCart()
+  const online = useNetworkStatus()
 
   const seller = profile?.role === 'seller'
 
@@ -24,6 +26,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           }}
         />
       </div>
+
+      {!online ? (
+        <div className="bg-[var(--danger)] px-4 py-2 text-center text-sm font-medium text-white">
+          You are offline. Check your connection — live video and chat may pause until you reconnect.
+        </div>
+      ) : null}
 
       <header className="sticky top-0 z-40 border-b border-[var(--line)]/80 bg-[var(--bg)]/85 backdrop-blur-md">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">

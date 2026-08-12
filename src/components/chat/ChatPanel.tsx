@@ -83,7 +83,7 @@ export function ChatPanel({
           className="min-w-0 flex-1 rounded-xl border border-[var(--line)] px-3 py-2 text-sm outline-none ring-[var(--accent)] focus:ring-2"
           disabled={sending}
         />
-        <Button type="submit" disabled={sending || !text.trim()}>
+        <Button type="submit" className="min-h-11" disabled={sending || !text.trim()}>
           {sending ? '…' : 'Send'}
         </Button>
       </form>

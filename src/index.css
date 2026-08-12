@@ -35,11 +35,13 @@ html,
 body,
 #root {
   min-height: 100%;
+  min-height: 100dvh;
 }
 
 body {
   margin: 0;
   overflow-x: hidden;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 button,
