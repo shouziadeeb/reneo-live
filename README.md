@@ -5,7 +5,7 @@ Secure live-commerce MVP where sellers broadcast a product over Agora while cust
 ## Features
 
 ### Seller
-- Sign up / sign in with seller role (email OTP)
+- Sign up / sign in with seller role
 - Create products with image upload
 - View own products
 - Start a live session for a product
@@ -15,7 +15,7 @@ Secure live-commerce MVP where sellers broadcast a product over Agora while cust
 - Receive realtime chat
 
 ### Customer
-- Sign up / sign in with customer role (email OTP)
+- Sign up / sign in with customer role
 - Browse active live sessions
 - Join as Agora audience (never publishes A/V)
 - LIVE indicator, seller name, viewer count (Agora channel presence)
@@ -133,15 +133,19 @@ Relationships: profile → products / live_sessions / messages; product → live
 RLS is enabled on all app tables. Frontend role checks are UX only — the database rejects unauthorized writes.
 
 Key guarantees:
-- Sellers can only mutate their own products (`seller_id = auth.uid()`), and triggers overwrite/forbid spoofed `seller_id`.
+- Sellers can only **read and mutate their own products** (`seller_id = auth.uid()`). Customers may read a product only when it is featured on a `live` or `ended` session. A seller cannot SELECT another seller's catalog by swapping IDs.
+- Triggers overwrite/forbid spoofed `seller_id` on insert and block ownership transfer on update.
 - Only the host can update/end their live session; triggers forbid host/product changes and non-host updates.
-- Message inserts always set `user_id = auth.uid()` — clients cannot impersonate another user.
-- Customers may read products needed for live shopping; they cannot modify live sessions.
+- Message inserts always set `user_id = auth.uid()` — clients cannot impersonate another user. Message UPDATE is blocked by trigger; client DELETE has no policy (denied).
+- Customers cannot modify live sessions or products.
 - Product images upload only under `product-images/{auth.uid()}/...`.
 - Agora App Certificate never ships in the frontend. Tokens are minted by the `agora-token` Edge Function after auth + live ownership/access checks.
 - Customers join Agora with role `audience` and never call publish APIs.
 
-SQL source of truth: `supabase/migrations/20260326000001_init.sql`.
+SQL source of truth:
+- `supabase/migrations/20260326000001_init.sql`
+- `supabase/migrations/20260326000002_fix_profiles_insert.sql`
+- `supabase/migrations/20260326000003_tighten_rls.sql`
 
 ## Agora architecture & token flow
 
@@ -181,29 +185,17 @@ SUPABASE_ANON_KEY=
 ## Local development
 
 1. Create a Supabase project.
-2. Run the SQL migrations in `supabase/migrations/` (SQL editor or CLI).
-3. **Enable email OTP auth** in Supabase Dashboard → **Authentication → Providers → Email**:
-   - Enable Email provider
-   - Optional: disable password sign-in if you only want OTP
-4. **Email template for OTP codes** — Authentication → **Email Templates** → **Magic Link** (used for OTP):
-   - Include the token in the email body, e.g. `Your login code is: {{ .Token }}`
-   - Without `{{ .Token }}`, users only get a magic link instead of a 6-digit code
-5. Deploy the Edge Function `supabase/functions/agora-token` and set secrets above.
-6. Create an Agora project; put App ID in frontend env and App ID + Certificate in function secrets.
-7. Install and run:
+2. Run the SQL files in `supabase/migrations/` in order (SQL editor or CLI).
+3. Deploy the Edge Function `supabase/functions/agora-token` and set secrets above.
+4. Create an Agora project; put App ID in frontend env and App ID + Certificate in function secrets.
+5. Install and run:
 
 ```bash
 npm install
 npm run dev
 ```
 
-### Testing OTP locally
-
-1. Open `/signup` or `/login`, enter your real email, and click **Send login code**.
-2. Check your inbox (and spam) for the 6-digit code from Supabase.
-3. Enter the code on the verify step — you are signed in immediately (no password).
-
-For signup, choose **seller** or **customer** before sending the code so the profile trigger stores the correct role.
+`npm run dev` binds to the LAN (`vite --host`) so a real phone on the same Wi-Fi can open `http://<your-lan-ip>:5173`.
 
 Useful scripts:
 
@@ -232,8 +224,15 @@ Production output is static (`dist/`) and deploys cleanly to Vercel.
 - No checkout/payment.
 - No moderation tools for chat.
 - Product image bucket is public-read (URL-addressable) with seller-scoped write policies.
-- Email confirmation behavior depends on your Supabase Auth settings.
+- Email confirmation behavior depends on your Supabase Auth settings. If confirmations are on, signup returns a “check your email” message instead of an immediate session.
 - Large Agora SDK increases the main bundle; code-splitting is a natural next step.
+- Cart is device-local (`localStorage`), not a server-side cart table. That matches the existing architecture and the “no payment required” scope.
+- A production Vercel deploy is configured (`vercel.json`) but a public production URL is not part of this repo. Deploy with the same `VITE_*` variables listed above.
+- Real-phone camera/mic testing must be done on the device (browser automation cannot grant those permissions).
+
+## Demo accounts
+
+Create one **seller** and one **customer** from `/signup` (choose the role on the form). Do not commit passwords. If Supabase returns `email rate limit exceeded`, wait and retry or use a different inbox.
 
 ## Manual test plan
 
@@ -271,17 +270,16 @@ What I would change:
 ### 2. What I did not finish / next two days
 
 Honest gaps:
-- End-to-end verification against a real Supabase + Agora project in this environment (secrets are placeholders by design)
-- Agora SDK code-splitting / route-level lazy loading for smaller first paint
-- Stronger automated RLS regression tests (e.g. pgTAP or scripted API checks)
-- Seller product edit/delete UI (API/RLS already support ownership-scoped delete)
-- Richer reconnect UX for Agora + Realtime flaps
+- A hosted production URL is not published from this repository (Vercel config is present; deploy still needs project env vars).
+- Real two-device Agora E2E (seller phone + customer phone) still needs a human to grant camera/mic.
+- Stronger automated RLS regression tests (e.g. pgTAP or scripted API checks) are not in CI.
+- Seller product edit/delete UI (API/RLS already support ownership-scoped delete).
 
-With two more days: wire real project secrets, run two-browser E2E, add RLS test scripts, lazy-load Agora, and polish mobile live controls.
+With two more days: add RLS test scripts, lazy-load Agora, polish reconnect UX further, and deploy a stable public demo with two seeded accounts.
 
 ### 3. Library / AI assistance I relied on
 
-I used the **Agora RTC Web SDK** and **Supabase JS/Edge runtime** rather than inventing WebRTC signaling, token cryptography, or auth session plumbing. Afterwards I verified the important seams myself: audience never publishes, tokens are minted only after live/host checks, and ownership is enforced with RLS + triggers (not UI gates). For token minting I used the maintained `agora-token` package inside the Edge Function instead of hand-rolling the binary token format.
+I used the **Agora RTC Web SDK** and **Supabase JS/Edge runtime** rather than inventing WebRTC signaling, token cryptography, or auth session plumbing. Afterwards I verified the important seams myself: audience never publishes, tokens are minted only after live/host checks, and ownership is enforced with RLS + triggers (not UI gates). For token minting I used the maintained `agora-token` package inside the Edge Function instead of hand-rolling the binary token format. Camera vs microphone failures are created as separate tracks so the UI can show the assessment’s specific permission messages instead of a generic getUserMedia blob.
 
 ## License
 
