@@ -5,7 +5,7 @@ Secure live-commerce MVP where sellers broadcast a product over Agora while cust
 ## Features
 
 ### Seller
-- Sign up / sign in with seller role
+- Sign up / sign in with seller role (email OTP)
 - Create products with image upload
 - View own products
 - Start a live session for a product
@@ -15,7 +15,7 @@ Secure live-commerce MVP where sellers broadcast a product over Agora while cust
 - Receive realtime chat
 
 ### Customer
-- Sign up / sign in with customer role
+- Sign up / sign in with customer role (email OTP)
 - Browse active live sessions
 - Join as Agora audience (never publishes A/V)
 - LIVE indicator, seller name, viewer count (Agora channel presence)
@@ -181,15 +181,29 @@ SUPABASE_ANON_KEY=
 ## Local development
 
 1. Create a Supabase project.
-2. Run the SQL in `supabase/migrations/20260326000001_init.sql` (SQL editor or CLI).
-3. Deploy the Edge Function `supabase/functions/agora-token` and set secrets above.
-4. Create an Agora project; put App ID in frontend env and App ID + Certificate in function secrets.
-5. Install and run:
+2. Run the SQL migrations in `supabase/migrations/` (SQL editor or CLI).
+3. **Enable email OTP auth** in Supabase Dashboard → **Authentication → Providers → Email**:
+   - Enable Email provider
+   - Optional: disable password sign-in if you only want OTP
+4. **Email template for OTP codes** — Authentication → **Email Templates** → **Magic Link** (used for OTP):
+   - Include the token in the email body, e.g. `Your login code is: {{ .Token }}`
+   - Without `{{ .Token }}`, users only get a magic link instead of a 6-digit code
+5. Deploy the Edge Function `supabase/functions/agora-token` and set secrets above.
+6. Create an Agora project; put App ID in frontend env and App ID + Certificate in function secrets.
+7. Install and run:
 
 ```bash
 npm install
 npm run dev
 ```
+
+### Testing OTP locally
+
+1. Open `/signup` or `/login`, enter your real email, and click **Send login code**.
+2. Check your inbox (and spam) for the 6-digit code from Supabase.
+3. Enter the code on the verify step — you are signed in immediately (no password).
+
+For signup, choose **seller** or **customer** before sending the code so the profile trigger stores the correct role.
 
 Useful scripts:
 

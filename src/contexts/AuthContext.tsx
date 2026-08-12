@@ -15,13 +15,13 @@ interface AuthContextValue {
   session: Session | null
   profile: Profile | null
   loading: boolean
-  signUp: (input: {
+  sendOtp: (input: {
     email: string
-    password: string
-    name: string
-    role: UserRole
+    name?: string
+    role?: UserRole
+    isSignup: boolean
   }) => Promise<void>
-  signIn: (email: string, password: string) => Promise<void>
+  verifyOtp: (email: string, token: string) => Promise<void>
   signOut: () => Promise<void>
   refreshProfile: () => Promise<void>
 }
@@ -38,7 +38,6 @@ async function loadProfile(userId: string): Promise<Profile | null> {
   if (error) throw new Error(error.message)
   if (data) return data
 
-  // Profile is created by DB trigger; this RPC backfills if it was missed.
   const { data: ensured, error: ensureError } = await supabase.rpc('ensure_profile')
   if (ensureError) throw new Error(ensureError.message)
   return ensured as Profile
@@ -118,45 +117,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const signUp = useCallback(
-    async (input: { email: string; password: string; name: string; role: UserRole }) => {
-      const name = input.name.trim()
-      if (!name) throw new Error('Name is required.')
-      if (input.password.length < 6) {
-        throw new Error('Password must be at least 6 characters.')
+  const sendOtp = useCallback(
+    async (input: {
+      email: string
+      name?: string
+      role?: UserRole
+      isSignup: boolean
+    }) => {
+      const email = input.email.trim()
+      if (!email) throw new Error('Email is required.')
+
+      if (input.isSignup) {
+        if (!input.name?.trim()) throw new Error('Name is required.')
+        if (!input.role) throw new Error('Please choose seller or customer.')
       }
 
-      const { data, error } = await supabase.auth.signUp({
-        email: input.email.trim(),
-        password: input.password,
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
         options: {
-          data: {
-            name,
-            role: input.role,
-          },
+          shouldCreateUser: input.isSignup,
+          data: input.isSignup
+            ? {
+                name: input.name!.trim(),
+                role: input.role,
+              }
+            : undefined,
         },
       })
 
       if (error) throw new Error(error.message)
-      if (!data.user) throw new Error('Signup failed. Please try again.')
-
-      // Profile is created server-side by the auth.users trigger.
-      // Do not insert from the client here — without a session (email confirmation),
-      // RLS would reject the row.
-      if (!data.session) {
-        throw new Error(
-          'Account created. Check your email to confirm your address, then sign in.',
-        )
-      }
     },
     [],
   )
 
-  const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
+  const verifyOtp = useCallback(async (email: string, token: string) => {
+    const code = token.trim()
+    if (code.length !== 6) {
+      throw new Error('Enter the 6-digit code from your email.')
+    }
+
+    const { error } = await supabase.auth.verifyOtp({
       email: email.trim(),
-      password,
+      token: code,
+      type: 'email',
     })
+
     if (error) throw new Error(error.message)
   }, [])
 
@@ -171,12 +176,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       profile,
       loading,
-      signUp,
-      signIn,
+      sendOtp,
+      verifyOtp,
       signOut,
       refreshProfile,
     }),
-    [user, session, profile, loading, signUp, signIn, signOut, refreshProfile],
+    [user, session, profile, loading, sendOtp, verifyOtp, signOut, refreshProfile],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
