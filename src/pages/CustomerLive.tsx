@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { ChatPanel } from '../components/chat/ChatPanel'
 import { LiveStage } from '../components/live/LiveStage'
@@ -10,6 +10,7 @@ import { useAgora } from '../hooks/useAgora'
 import { useAuth } from '../hooks/useAuth'
 import { useChat } from '../hooks/useChat'
 import { useLiveSession } from '../hooks/useLive'
+import { useLivePresence } from '../hooks/useLivePresence'
 
 function requestStageFullscreen(node: HTMLDivElement) {
   if (document.fullscreenElement) {
@@ -37,8 +38,10 @@ function requestStageFullscreen(node: HTMLDivElement) {
 export function CustomerLivePage() {
   const { liveId } = useParams<{ liveId: string }>()
   const { user } = useAuth()
+  const navigate = useNavigate()
   const stageRef = useRef<HTMLDivElement | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [leaving, setLeaving] = useState(false)
   const { live, loading, error } = useLiveSession(liveId)
 
   const isLive = live?.status === 'live'
@@ -49,11 +52,28 @@ export function CustomerLivePage() {
     enabled: Boolean(isLive),
   })
 
+  const presence = useLivePresence({
+    liveId: liveId ?? null,
+    userId: user?.id ?? null,
+    role: 'audience',
+    enabled: Boolean(isLive),
+  })
+
   const chat = useChat(isLive ? (liveId ?? null) : null, user?.id ?? null)
 
   const handleFullscreen = useCallback(() => {
     if (stageRef.current) requestStageFullscreen(stageRef.current)
   }, [])
+
+  async function handleLeave() {
+    setLeaving(true)
+    try {
+      await agora.leave()
+      navigate('/lives')
+    } catch {
+      navigate('/lives')
+    }
+  }
 
   if (loading) {
     return (
@@ -108,12 +128,14 @@ export function CustomerLivePage() {
               warning={agora.warning}
               isHost={false}
               sellerName={live.host?.name}
-              viewerCount={agora.viewerCount}
+              viewerCount={presence.customerCount}
               reconnecting={agora.reconnecting}
               needsTapToPlay={agora.needsTapToPlay}
               onFullscreen={handleFullscreen}
+              onLeave={() => void handleLeave()}
               onRetry={agora.retry}
               onResumePlayback={agora.resumePlayback}
+              leaving={leaving}
               liveEnded={!isLive}
             />
           </div>

@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react'
+import { useState } from 'react'
 
 export function Button({
   variant = 'primary',
@@ -37,6 +38,60 @@ export function Input({
         className={`w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-2.5 text-sm text-[var(--ink)] outline-none ring-[var(--accent)] placeholder:text-[var(--muted)] focus:ring-2 ${className}`}
         {...props}
       />
+      {error ? <span className="text-xs text-[var(--danger)]">{error}</span> : null}
+    </label>
+  )
+}
+
+function EyeIcon({ off }: { off?: boolean }) {
+  if (off) {
+    return (
+      <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+        <path d="M3 3l18 18" strokeLinecap="round" />
+        <path d="M10.6 10.6A2 2 0 0 0 12 14a2 2 0 0 0 1.4-.6" strokeLinecap="round" />
+        <path
+          d="M9.9 5.2A10.5 10.5 0 0 1 12 5c5 0 9.3 3.1 11 7.5a12.3 12.3 0 0 1-4.2 5.1M6.1 6.1A12.2 12.2 0 0 0 1 12.5C2.7 16.9 7 20 12 20c1.4 0 2.7-.3 3.9-.8"
+          strokeLinecap="round"
+        />
+      </svg>
+    )
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+      <path d="M1 12.5C2.7 8.1 7 5 12 5s9.3 3.1 11 7.5C21.3 16.9 17 20 12 20S2.7 16.9 1 12.5Z" />
+      <circle cx="12" cy="12.5" r="3.2" />
+    </svg>
+  )
+}
+
+export function PasswordInput({
+  label,
+  error,
+  className = '',
+  ...props
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & { label?: string; error?: string }) {
+  const [visible, setVisible] = useState(false)
+
+  return (
+    <label className="block space-y-1.5">
+      {label ? <span className="text-sm font-medium text-[var(--ink)]">{label}</span> : null}
+      <div className="relative">
+        <input
+          type={visible ? 'text' : 'password'}
+          className={`w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-2.5 pr-12 text-sm text-[var(--ink)] outline-none ring-[var(--accent)] placeholder:text-[var(--muted)] focus:ring-2 ${className}`}
+          {...props}
+        />
+        <button
+          type="button"
+          onClick={() => setVisible((current) => !current)}
+          className="absolute inset-y-0 right-0 flex min-w-11 items-center justify-center text-[var(--muted)] hover:text-[var(--ink)]"
+          aria-label={visible ? 'Hide password' : 'Show password'}
+          aria-pressed={visible}
+        >
+          <EyeIcon off={visible} />
+        </button>
+      </div>
       {error ? <span className="text-xs text-[var(--danger)]">{error}</span> : null}
     </label>
   )

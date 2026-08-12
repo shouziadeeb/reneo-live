@@ -20,9 +20,11 @@ interface LiveStageProps {
   onSwitchCamera?: () => void
   onFullscreen?: () => void
   onEndLive?: () => void
+  onLeave?: () => void
   onRetry?: () => void
   onResumePlayback?: () => void
   ending?: boolean
+  leaving?: boolean
   liveEnded?: boolean
 }
 
@@ -45,9 +47,11 @@ export function LiveStage({
   onSwitchCamera,
   onFullscreen,
   onEndLive,
+  onLeave,
   onRetry,
   onResumePlayback,
   ending,
+  leaving,
   liveEnded,
 }: LiveStageProps) {
   const showOverlay = Boolean(
@@ -171,13 +175,27 @@ export function LiveStage({
             </Button>
           </>
         ) : (
-          <Button
-            variant="secondary"
-            className="ml-auto min-h-11 !bg-white/10 !text-white !border-white/15"
-            onClick={onFullscreen}
-          >
-            Fullscreen
-          </Button>
+          <>
+            <Button
+              variant="secondary"
+              className="min-h-11 !bg-white/10 !text-white !border-white/15"
+              onClick={onFullscreen}
+            >
+              Fullscreen
+            </Button>
+            {onLeave && !liveEnded ? (
+              <Button
+                variant="danger"
+                className="ml-auto min-h-11"
+                onClick={onLeave}
+                disabled={leaving}
+              >
+                {leaving ? 'Leaving…' : 'Leave live'}
+              </Button>
+            ) : (
+              <span className="ml-auto" />
+            )}
+          </>
         )}
       </div>
     </div>

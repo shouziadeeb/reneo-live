@@ -18,7 +18,8 @@ Secure live-commerce MVP where sellers broadcast a product over Agora while cust
 - Sign up / sign in with customer role
 - Browse active live sessions
 - Join as Agora audience (never publishes A/V)
-- LIVE indicator, seller name, viewer count (Agora channel presence)
+- LIVE indicator, seller name, viewer count (Supabase Presence)
+- Leave live
 - Featured product + in-page product drawer
 - Add to cart, change quantity, remove, cart total
 - Send/receive realtime chat
@@ -220,7 +221,7 @@ Production output is static (`dist/`) and deploys cleanly to Vercel.
 
 ## Known limitations
 
-- Viewer count uses Agora channel presence (`remoteUsers + 1`). Pure audience peers may be under/over counted depending on Agora live-mode visibility; it is not a fabricated number, but it is not full analytics-grade occupancy.
+- Viewer count is unique customers currently in the live, tracked with Supabase Realtime Presence (not Agora `remoteUsers`, which does not list live-mode audience). The same signed-in user in two tabs counts as one.
 - No checkout/payment.
 - No moderation tools for chat.
 - Product image bucket is public-read (URL-addressable) with seller-scoped write policies.
@@ -258,13 +259,13 @@ Most likely **realtime chat fan-out and client render cost**, then Agora connect
 - Every chat insert is replicated to subscribers. At hundreds of viewers with chatty rooms, Realtime and browser message lists become hot.
 - Rendering a growing unbounded message array on every client will jank.
 - Agora can scale media better than a naive chat UI, but each client still maintains an RTC connection.
-- Viewer count via `remoteUsers` is not a scalable analytics signal.
+- Viewer count uses Supabase Presence; at hundreds of join/leave events that channel also becomes hot.
 
 What I would change:
 - Paginate/window chat (last N messages), virtualize the list
 - Rate-limit sends; consider presence channels separate from message history
 - Move fan-out heavy chat to a dedicated system if needed (or broadcast-only rooms)
-- Use Agora Analytics / RTM / a presence table for accurate occupancy
+- Use Agora Analytics or a dedicated occupancy table if Presence fan-out becomes a bottleneck
 - CDN + edge caching for product payloads; keep live status updates coarse
 
 ### 2. What I did not finish / next two days
@@ -284,5 +285,6 @@ I used the **Agora RTC Web SDK** and **Supabase JS/Edge runtime** rather than in
 ## License
 
 Private assessment project.
-#   r e n e o - l i v e  
+#   r e n e o - l i v e 
+ 
  

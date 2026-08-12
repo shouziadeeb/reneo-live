@@ -1,7 +1,7 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { Alert, Button, Input } from '../components/ui'
+import { Alert, Button, Input, PasswordInput } from '../components/ui'
 
 export function LoginPage() {
   const { signIn, user, profile, loading } = useAuth()
@@ -46,9 +46,8 @@ export function LoginPage() {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
         />
-        <Input
+        <PasswordInput
           label="Password"
-          type="password"
           autoComplete="current-password"
           required
           value={password}
@@ -118,9 +117,8 @@ export function SignupPage() {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
         />
-        <Input
+        <PasswordInput
           label="Password"
-          type="password"
           autoComplete="new-password"
           required
           minLength={6}

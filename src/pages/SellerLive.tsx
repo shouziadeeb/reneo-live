@@ -9,6 +9,7 @@ import { useAgora } from '../hooks/useAgora'
 import { useAuth } from '../hooks/useAuth'
 import { useChat } from '../hooks/useChat'
 import { useLiveSession, useSellerLiveActions } from '../hooks/useLive'
+import { useLivePresence } from '../hooks/useLivePresence'
 
 function requestStageFullscreen(node: HTMLDivElement) {
   if (document.fullscreenElement) {
@@ -47,6 +48,13 @@ export function SellerLivePage() {
 
   const agora = useAgora({
     liveId: liveId ?? null,
+    role: 'host',
+    enabled: Boolean(isHost && isLive),
+  })
+
+  const presence = useLivePresence({
+    liveId: liveId ?? null,
+    userId: user?.id ?? null,
     role: 'host',
     enabled: Boolean(isHost && isLive),
   })
@@ -133,7 +141,7 @@ export function SellerLivePage() {
             warning={agora.warning}
             isHost
             sellerName={profile?.name}
-            viewerCount={agora.viewerCount}
+            viewerCount={presence.customerCount}
             micMuted={agora.micMuted}
             cameraOff={agora.cameraOff}
             canSwitchCamera={agora.canSwitchCamera}
