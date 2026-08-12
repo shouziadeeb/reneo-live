@@ -17,12 +17,20 @@ Secure live-commerce MVP where sellers broadcast a product over Agora while cust
 ### Customer
 - Sign up / sign in with customer role
 - Browse active live sessions
-- Join as Agora audience (never publishes A/V)
+- Join as Agora audience (never publishes A/V by default)
 - LIVE indicator, seller name, viewer count (Supabase Presence)
 - Leave live
 - Featured product + in-page product drawer
 - Add to cart, change quantity, remove, cart total
 - Send/receive realtime chat
+- **Round 2 Part A:** request to speak (audio / audio+video), respond to seller invites, explicit mic/camera consent before publishing, return to audience
+
+### Interactive live (Round 2 Part A)
+- Seller viewer list with status, pending requests, invite, accept/reject, return to audience
+- Authoritative roles in Postgres (`live_interactions`) — clients cannot self-promote to Co-host
+- In-channel Agora role upgrade/downgrade (no live restart)
+- Pending requests/invites expire after 2 minutes
+- Max 4 simultaneous Speakers/Co-hosts per live
 
 ## Technology stack
 
@@ -127,7 +135,21 @@ Leaving `/lives/:id` would risk tearing down the Agora client/subscription (or a
 | message | text | 1–500 chars |
 | created_at | timestamptz | |
 
-Relationships: profile → products / live_sessions / messages; product → live_sessions; live_session → messages.
+### `live_interactions` (Round 2 Part A)
+| Column | Type | Notes |
+|---|---|---|
+| id | uuid PK | |
+| live_id | uuid FK → live_sessions | |
+| user_id | uuid FK → profiles | viewer/participant |
+| mode | text | `audio` \| `audio_video` |
+| origin | text | `request` \| `invite` |
+| status | text | `pending` \| `accepted` \| `active` \| `rejected` \| `cancelled` \| `expired` \| `ended` |
+| participant_role | text | `speaker` \| `cohost` (null when not accepted/active) |
+| expires_at | timestamptz | pending/accepted timeout (2 min) |
+
+Mutations only via SECURITY DEFINER RPCs. Partial unique index prevents duplicate open rows per viewer.
+
+Relationships: profile → products / live_sessions / messages / live_interactions; product → live_sessions; live_session → messages / live_interactions.
 
 ## RLS & security model
 
@@ -147,22 +169,25 @@ SQL source of truth:
 - `supabase/migrations/20260326000001_init.sql`
 - `supabase/migrations/20260326000002_fix_profiles_insert.sql`
 - `supabase/migrations/20260326000003_tighten_rls.sql`
+- `supabase/migrations/20260326000004_interactive_live.sql`
 
 ## Agora architecture & token flow
 
 ```text
 Seller/Customer React app
   → supabase.functions.invoke('agora-token', { liveId, role })
-  → Edge Function validates JWT, profile, live status, host permission
+  → Edge Function validates JWT, profile, live status, host/participant permission
   → builds RTC token with AGORA_APP_CERTIFICATE (server secret)
   → returns { token, appId, channel, uid, role }
   → AgoraRTC client joins channel
 ```
 
 - Seller: `setClientRole('host')` → create mic/cam tracks → `publish`
-- Customer: `setClientRole('audience')` → subscribe only
+- Customer (default): `setClientRole('audience')` → subscribe only
+- Customer (authorized Speaker/Co-host): after server acceptance + explicit consent → renew publisher token → `setClientRole('host')` → publish selected tracks (same channel; no leave/rejoin)
 - Channel name: `live_{liveIdWithoutDashes}`
 - Token TTL: 1 hour
+- Publisher tokens for non-hosts require `live_interactions.status ∈ {accepted, active}` via `user_can_publish_on_live`
 
 ## Environment variables
 
@@ -213,15 +238,80 @@ Production output is static (`dist/`) and deploys cleanly to Vercel.
 - [x] No service-role key in frontend
 - [x] No Agora certificate in frontend / `VITE_` vars / git
 - [x] `.env` gitignored; `.env.example` placeholders only
-- [x] RLS enabled on profiles, products, live_sessions, messages
+- [x] RLS enabled on profiles, products, live_sessions, messages, live_interactions
 - [x] Ownership enforced for products + live sessions
 - [x] `user_id` / `seller_id` / `host_id` cannot be spoofed (triggers + RLS)
 - [x] Token generation is server-side and session-aware
-- [x] Customer Agora path never publishes tracks
+- [x] Customer Agora path never publishes tracks unless server-authorized + explicit consent
+- [x] Interactive roles enforced by SECURITY DEFINER RPCs + publisher token checks (not client state)
+
+## Part A Technical Note — Interactive Live
+
+### 1. Agora role-switch mechanism
+
+All participants join the **same** Agora live channel (`live_{liveId}`). The seller joins as publisher (`host`). Viewers join as subscribers (`audience`).
+
+Transitions happen **in-channel** (no leave/rejoin, no page reload, no session restart):
+
+| Transition | What the participant client does | What others observe |
+|---|---|---|
+| Audience → Speaker | After host acceptance + explicit mic consent: renew **publisher** token → `setClientRole('host')` → create/publish microphone only | New remote audio from that uid; main host video continues |
+| Audience → Co-host | Same, plus camera track after explicit cam consent | New remote audio + video tile; main host video continues |
+| Speaker/Co-host → Audience | `unpublish` local tracks → close tracks → renew **subscriber** token → `setClientRole('audience')` | That uid stops publishing; everyone remains in the channel watching the host |
+
+The main seller broadcast is never torn down for these transitions. Other viewers stay subscribed to the host and simply gain/lose additional remote publishers.
+
+### 2. Signaling
+
+**Mechanism:** Supabase Postgres table `live_interactions` + Realtime `postgres_changes` + SECURITY DEFINER RPCs.
+
+**Why selected:** The project already uses Supabase Auth, RLS, and Realtime for chat/live status. Extending that stack avoids new infrastructure (no separate websocket server, no Agora RTM dependency).
+
+**Flow:**
+- Viewer `request_to_speak(live_id, mode)` → row `origin=request`, `status=pending`
+- Host `respond_to_speak_request(id, accept)` → `accepted` or `rejected`
+- Host `invite_to_speak(live_id, user_id, mode)` → `origin=invite`, `status=pending`
+- Viewer `respond_to_invite(id, accept)` → `accepted` or `rejected`
+- After device consent + successful publish: viewer `confirm_participant_media(id)` → `active`
+- Host/viewer `end_intervention(id)` → `ended` / `cancelled`
+
+**Validation:** Clients cannot INSERT/UPDATE the table directly (no write policies). All mutations go through RPCs that check `auth.uid()`, host ownership, live status, duplicate open rows, and capacity.
+
+**Delayed / duplicated messages:** Realtime upserts by interaction `id`. Duplicate pending rows are blocked by a partial unique index on `(live_id, user_id)` where status ∈ `{pending, accepted, active}`. Stale pending/accepted rows expire after **2 minutes** (`expires_at` + `expire_stale_live_interactions`).
+
+**Alternatives considered:** Agora RTM (extra product/SDK surface); pure Presence broadcast events (not authoritative, spoofable). Rejected in favor of Postgres as source of truth.
+
+### 3. Role authority / security
+
+> **What prevents a client from declaring itself Co-host?**
+
+1. **Authoritative state** lives in `live_interactions` on the server. A browser cannot grant itself `participant_role = 'cohost'` — there is no client write path; only the host RPCs can accept/invite, and only the participant can confirm media after acceptance.
+2. **Agora publisher tokens** are minted only by the `agora-token` Edge Function. For non-hosts, the function calls `user_can_publish_on_live`, which requires an `accepted` or `active` interaction row. Without that token, `setClientRole('host')` / publish fails at the Agora network.
+3. Frontend role UI is display-only. Changing React state does not change DB rows or tokens.
+
+### 4. Disconnection handling
+
+- If a Speaker/Co-host leaves Presence, the host calls `end_intervention_for_user` to clear open interaction rows.
+- The participant client unpublishes on leave / when its interaction moves to `ended|cancelled|rejected|expired`.
+- Ending the live session triggers `cleanup_interactions_on_live_end`, closing pending/active interventions.
+- Permission denial after acceptance: tracks are not published; UI shows the error; user can retry consent or stay audience; main broadcast continues.
+
+### 5. Capacity / cost reasoning
+
+**Recommended maximum: 4 simultaneous Speakers/Co-hosts** (enforced in accept/invite RPCs), plus 1 seller host = up to **5 publishers**.
+
+- Reasonable for live-commerce Q&A without turning the room into a large meeting.
+- Each publisher adds uplink bandwidth and N−1 subscribe edges for other clients.
+- Audience-only viewers remain subscribers (cheaper than publishers).
+- Cost: Agora billing is usage-based (minutes × media). Exact pricing is **not verified here** — treat additional publishers as additive RTC usage; prefer keeping interactive slots small.
 
 ## Known limitations
 
 - Viewer count is unique customers currently in the live, tracked with Supabase Realtime Presence (not Agora `remoteUsers`, which does not list live-mode audience). The same signed-in user in two tabs counts as one.
+- Interactive viewer roster depends on Presence metadata (name/avatar). A viewer who never successfully tracks Presence will not appear in the seller list even if they can watch via Agora.
+- Pending speak requests/invites expire after 2 minutes; there is no push notification outside the open live page.
+- Max 4 Speakers/Co-hosts is an application policy, not an Agora hard limit.
+- Part B (YouTube/Facebook/TikTok/RTMP multistreaming) is intentionally not implemented.
 - No checkout/payment.
 - No moderation tools for chat.
 - Product image bucket is public-read (URL-addressable) with seller-scoped write policies.
@@ -248,7 +338,18 @@ Login → find live → join → watch → chat → View product drawer → add 
 2. Seller A deletes Seller B’s product → rejected by RLS
 3. Seller A ends Seller B’s live → rejected by RLS/trigger
 4. Message insert with another `user_id` → overwritten/rejected (`auth.uid()`)
-5. Customer Agora publish → not invoked by app; host-role token denied for non-hosts
+5. Customer requests publisher token without accepted interaction → `UNAUTHORIZED_PUBLISHER`
+6. Client self-assigns Co-host in UI without host accept → cannot confirm media / cannot get publisher token
+
+### Interactive live (3 devices)
+1. Device 1 seller goes live. Devices 2–3 customers join and watch (Round 1 still works).
+2. Device 2 requests **Audio only** → seller Accept → Device 2 clicks **Enable microphone** → grant permission → Speaker; Device 1 and 3 hear them; host video uninterrupted.
+3. Device 1 invites Device 3 to **Audio + Video** → Device 3 Accept → **Enable mic + camera** → Co-host visible/audible to others.
+4. Device 1 **Return to Audience** for both → they stop publishing but keep watching.
+5. Deny mic/camera after acceptance → error shown, no publish, live continues.
+6. Disconnect a Speaker mid-intervention → host cleans state; live continues.
+7. Duplicate request while pending → rejected by unique open-interaction constraint.
+8. DevTools: force local UI to “cohost” without server accept → publisher token denied; cannot publish.
 
 ## Part C answers
 

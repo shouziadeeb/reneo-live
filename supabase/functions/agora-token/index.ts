@@ -23,11 +23,13 @@ type ErrorCode =
   | "LIVE_NOT_FOUND"
   | "LIVE_NOT_ACTIVE"
   | "UNAUTHORIZED_HOST"
+  | "UNAUTHORIZED_PUBLISHER"
   | "AGORA_TOKEN_GENERATION_FAILED"
   | "INTERNAL_ERROR";
 
 interface TokenRequest {
   liveId?: string;
+  /** Agora RTC role: host = publisher, audience = subscriber */
   role?: "host" | "audience";
 }
 
@@ -229,12 +231,34 @@ Deno.serve(async (req) => {
     }
 
     if (requestedRole === "host") {
-      if (profile.role !== "seller" || live.host_id !== user.id) {
-        return errorResponse(
-          403,
-          "UNAUTHORIZED_HOST",
-          "Only the session host can join as broadcaster.",
-        );
+      // Session host may always publish. Authorized speakers/co-hosts may publish
+      // only while live_interactions.status is accepted|active (server-side truth).
+      const isSessionHost =
+        profile.role === "seller" && live.host_id === user.id;
+
+      if (!isSessionHost) {
+        const { data: canPublish, error: publishCheckError } = await supabase
+          .rpc("user_can_publish_on_live", {
+            p_live_id: liveId,
+            p_user_id: user.id,
+          });
+
+        if (publishCheckError) {
+          return errorResponse(
+            500,
+            "INTERNAL_ERROR",
+            publishCheckError.message ?? "Could not verify publish permission.",
+            publishCheckError,
+          );
+        }
+
+        if (!canPublish) {
+          return errorResponse(
+            403,
+            "UNAUTHORIZED_PUBLISHER",
+            "Publisher tokens require host ownership or an accepted speak invitation.",
+          );
+        }
       }
     }
 

@@ -51,6 +51,12 @@ async function readFunctionError(
   return { message: fallback }
 }
 
+/**
+ * Fetch an Agora RTC token.
+ * - `audience` → subscriber token (watch only)
+ * - `host` → publisher token (session host OR authorized speaker/co-host)
+ * Publisher authorization is enforced server-side; the client cannot mint its own role.
+ */
 export async function fetchAgoraToken(
   liveId: string,
   role: 'host' | 'audience',
@@ -79,6 +85,12 @@ export async function fetchAgoraToken(
     if (code === 'INVALID_SESSION') {
       throw new AgoraTokenError(
         'Your session expired. Please sign in again to join the live.',
+        code,
+      )
+    }
+    if (code === 'UNAUTHORIZED_PUBLISHER' || code === 'UNAUTHORIZED_HOST') {
+      throw new AgoraTokenError(
+        'You are not authorized to publish on this live.',
         code,
       )
     }

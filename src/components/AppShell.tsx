@@ -5,7 +5,14 @@ import { useCart } from '../hooks/useCart'
 import { useNetworkStatus } from '../hooks/useNetworkStatus'
 import { Button } from './ui'
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({
+  children,
+  wide = false,
+}: {
+  children: ReactNode
+  /** Wider content area for immersive stream pages */
+  wide?: boolean
+}) {
   const { profile, signOut } = useAuth()
   const { itemCount } = useCart()
   const online = useNetworkStatus()
@@ -34,7 +41,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       ) : null}
 
       <header className="sticky top-0 z-40 border-b border-[var(--line)]/80 bg-[var(--bg)]/85 backdrop-blur-md">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3 sm:px-6">
+        <div
+          className={`mx-auto flex items-center justify-between gap-4 px-4 py-3 sm:px-6 ${
+            wide ? 'max-w-[90rem]' : 'max-w-6xl'
+          }`}
+        >
           <Link to={seller ? '/seller' : '/lives'} className="group flex items-baseline gap-2">
             <span className="font-display text-2xl tracking-tight text-[var(--ink)]">Reneo</span>
             <span className="rounded-md bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-white">
@@ -102,7 +113,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">{children}</main>
+      <main
+        className={`mx-auto px-3 py-4 sm:px-6 sm:py-5 ${wide ? 'max-w-[90rem]' : 'max-w-6xl px-4 py-6 sm:py-8'}`}
+      >
+        {children}
+      </main>
     </div>
   )
 }

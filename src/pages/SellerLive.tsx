@@ -1,15 +1,23 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { ChatPanel } from '../components/chat/ChatPanel'
-import { LiveStage } from '../components/live/LiveStage'
+import { HostSpeakRequestBanner } from '../components/live/HostSpeakRequestBanner'
+import {
+  StreamParticipantGrid,
+  type StreamGridTile,
+} from '../components/live/StreamParticipantGrid'
+import { StreamRoom } from '../components/live/StreamRoom'
+import { ViewerManagementPanel } from '../components/live/ViewerManagementPanel'
 import { FeaturedProductCard } from '../components/products/FeaturedProductCard'
 import { Alert, Spinner } from '../components/ui'
 import { useAgora } from '../hooks/useAgora'
 import { useAuth } from '../hooks/useAuth'
 import { useChat } from '../hooks/useChat'
+import { useInteractiveLive } from '../hooks/useInteractiveLive'
 import { useLiveSession, useSellerLiveActions } from '../hooks/useLive'
 import { useLivePresence } from '../hooks/useLivePresence'
+import { uidFromUserId } from '../lib/agora'
 
 function requestStageFullscreen(node: HTMLDivElement) {
   if (document.fullscreenElement) {
@@ -42,14 +50,77 @@ export function SellerLivePage() {
   const { live, loading, error } = useLiveSession(liveId)
   const { end, ending } = useSellerLiveActions()
   const [endError, setEndError] = useState<string | null>(null)
+  const [sidebarTab, setSidebarTab] = useState<'chat' | 'people' | 'product'>('chat')
+  const [hostNotice, setHostNotice] = useState<string | null>(null)
+  const seenPendingIdsRef = useRef<Set<string>>(new Set())
+  const pendingBootstrappedRef = useRef(false)
 
   const isHost = Boolean(live && profile && live.host_id === profile.id)
   const isLive = live?.status === 'live'
 
-  const agora = useAgora({
+  const interactive = useInteractiveLive({
+    liveId: liveId ?? null,
+    userId: user?.id ?? null,
+    isHost: true,
+    enabled: Boolean(isHost && isLive),
+  })
+
+  // Notify host + open People when a new speak request arrives.
+  useEffect(() => {
+    const pending = interactive.pendingRequests
+    const ids = new Set(pending.map((r) => r.id))
+
+    if (!pendingBootstrappedRef.current) {
+      seenPendingIdsRef.current = ids
+      pendingBootstrappedRef.current = true
+      return
+    }
+
+    const newcomers = pending.filter((r) => !seenPendingIdsRef.current.has(r.id))
+    seenPendingIdsRef.current = ids
+
+    if (newcomers.length === 0) return
+
+    const first = newcomers[0]
+    const name = first.user?.name ?? 'A viewer'
+    const mode = first.mode === 'audio_video' ? 'Audio + Video' : 'Audio'
+    setHostNotice(
+      newcomers.length === 1
+        ? `${name} requested to speak (${mode}).`
+        : `${newcomers.length} new speak requests received.`,
+    )
+    setSidebarTab('people')
+
+    const timer = window.setTimeout(() => setHostNotice(null), 6000)
+    return () => window.clearTimeout(timer)
+  }, [interactive.pendingRequests])
+
+  const pendingCount = interactive.pendingRequests.length
+
+  const {
+    localVideoRef,
+    bindRemoteVideoEl,
+    connecting,
+    connected,
+    error: agoraError,
+    warning,
+    micMuted,
+    cameraOff,
+    canSwitchCamera,
+    reconnecting,
+    needsTapToPlay,
+    remoteParticipants,
+    toggleMic,
+    toggleCamera,
+    switchCamera,
+    leave,
+    retry,
+    resumePlayback,
+  } = useAgora({
     liveId: liveId ?? null,
     role: 'host',
     enabled: Boolean(isHost && isLive),
+    hostUserId: profile?.id ?? null,
   })
 
   const presence = useLivePresence({
@@ -57,9 +128,59 @@ export function SellerLivePage() {
     userId: user?.id ?? null,
     role: 'host',
     enabled: Boolean(isHost && isLive),
+    displayName: profile?.name ?? null,
+    avatar: profile?.avatar ?? null,
+    onAudienceLeave: (leftUserId) => {
+      void interactive.cleanupDisconnectedUser(leftUserId)
+    },
   })
 
   const chat = useChat(isLive ? (liveId ?? null) : null, user?.id ?? null)
+
+  const nameForUid = useCallback(
+    (uid: number, isSessionHost: boolean) => {
+      if (isSessionHost) return profile?.name ?? 'Host'
+      const match = presence.viewers.find((v) => uidFromUserId(v.userId) === uid)
+      return match?.name ?? 'Guest'
+    },
+    [presence.viewers, profile?.name],
+  )
+
+  const gridTiles = useMemo<StreamGridTile[]>(() => {
+    const tiles: StreamGridTile[] = [
+      {
+        key: 'local-host',
+        name: profile?.name ?? 'You',
+        label: profile?.name ?? 'You',
+        hasVideo: !cameraOff,
+        muted: micMuted,
+        videoRef: localVideoRef,
+      },
+    ]
+
+    for (const p of remoteParticipants) {
+      if (!p.hasAudio && !p.hasVideo) continue
+      const uid = p.uid
+      tiles.push({
+        key: `remote-${uid}`,
+        name: nameForUid(uid, p.isSessionHost),
+        label: p.hasVideo ? 'Co-host' : 'Speaker',
+        hasVideo: p.hasVideo,
+        muted: !p.hasAudio,
+        bindVideoEl: (el) => bindRemoteVideoEl(uid, el),
+      })
+    }
+
+    return tiles
+  }, [
+    cameraOff,
+    micMuted,
+    localVideoRef,
+    remoteParticipants,
+    bindRemoteVideoEl,
+    nameForUid,
+    profile?.name,
+  ])
 
   const handleFullscreen = useCallback(() => {
     if (stageRef.current) requestStageFullscreen(stageRef.current)
@@ -70,7 +191,7 @@ export function SellerLivePage() {
     setEndError(null)
     try {
       await end(liveId)
-      await agora.leave().catch(() => undefined)
+      await leave().catch(() => undefined)
       navigate('/seller')
     } catch (err) {
       setEndError(
@@ -83,7 +204,7 @@ export function SellerLivePage() {
 
   if (loading) {
     return (
-      <AppShell>
+      <AppShell wide>
         <Spinner label="Starting seller live…" />
       </AppShell>
     )
@@ -91,7 +212,7 @@ export function SellerLivePage() {
 
   if (error || !live) {
     return (
-      <AppShell>
+      <AppShell wide>
         <Alert>{error || 'Live session not found.'}</Alert>
         <Link to="/seller" className="mt-4 inline-block text-sm font-semibold text-[var(--accent-strong)]">
           Back to dashboard
@@ -102,76 +223,109 @@ export function SellerLivePage() {
 
   if (!isHost) {
     return (
-      <AppShell>
+      <AppShell wide>
         <Alert>Only the host can broadcast on this live session.</Alert>
       </AppShell>
     )
   }
 
+  const roomTitle = live.product?.name ?? 'Live session'
+
   return (
-    <AppShell>
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <div>
-          <h1 className="font-display text-2xl sm:text-3xl">You are live</h1>
-          <p className="text-sm text-[var(--muted)]">
-            Broadcasting as {profile?.name}. Viewers see your camera and the featured product.
-          </p>
-        </div>
-      </div>
-
-      {!isLive ? <Alert tone="info">This live session has ended.</Alert> : null}
-      {endError ? (
-        <div className="mb-4">
-          <Alert>{endError}</Alert>
-        </div>
-      ) : null}
-      {!live.product ? (
-        <div className="mb-4">
-          <Alert>The featured product is no longer available.</Alert>
-        </div>
-      ) : null}
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
-        <div ref={stageRef}>
-          <LiveStage
-            videoRef={agora.localVideoRef}
-            connecting={agora.connecting}
-            connected={agora.connected}
-            error={agora.error}
-            warning={agora.warning}
-            isHost
-            sellerName={profile?.name}
-            viewerCount={presence.customerCount}
-            micMuted={agora.micMuted}
-            cameraOff={agora.cameraOff}
-            canSwitchCamera={agora.canSwitchCamera}
-            reconnecting={agora.reconnecting}
-            needsTapToPlay={agora.needsTapToPlay}
-            onToggleMic={() => void agora.toggleMic()}
-            onToggleCamera={() => void agora.toggleCamera()}
-            onSwitchCamera={() => void agora.switchCamera()}
-            onFullscreen={handleFullscreen}
-            onEndLive={() => void handleEnd()}
-            onRetry={agora.retry}
-            onResumePlayback={agora.resumePlayback}
-            ending={ending}
-            liveEnded={!isLive}
+    <AppShell wide>
+      <StreamRoom
+        title={roomTitle}
+        subtitle={`Hosting as ${profile?.name ?? 'seller'}`}
+        backTo="/seller"
+        backLabel="← Dashboard"
+        liveEnded={!isLive}
+        viewerCount={presence.customerCount}
+        connecting={connecting || reconnecting}
+        connected={connected}
+        error={agoraError}
+        warning={warning}
+        needsTapToPlay={needsTapToPlay}
+        onRetry={retry}
+        onResumePlayback={resumePlayback}
+        stageRef={(node) => {
+          stageRef.current = node
+        }}
+        sidebarTab={sidebarTab}
+        onSidebarTabChange={setSidebarTab}
+        showPeopleTab={isLive}
+        showProductTab={Boolean(live.product)}
+        peopleBadgeCount={pendingCount}
+        banner={
+          endError || !live.product || hostNotice || (isLive && pendingCount > 0) ? (
+            <div className="space-y-2">
+              {endError ? <Alert>{endError}</Alert> : null}
+              {!live.product ? <Alert>The featured product is no longer available.</Alert> : null}
+              {hostNotice ? <Alert tone="info">{hostNotice}</Alert> : null}
+              {isLive ? (
+                <HostSpeakRequestBanner
+                  pendingRequests={interactive.pendingRequests}
+                  busyId={interactive.busyId}
+                  onOpenPeople={() => setSidebarTab('people')}
+                  onAccept={async (id) => {
+                    await interactive.acceptRequest(id)
+                    setHostNotice('Request accepted — waiting for the viewer to enable media.')
+                    window.setTimeout(() => setHostNotice(null), 5000)
+                  }}
+                  onReject={async (id) => {
+                    await interactive.rejectRequest(id)
+                    setHostNotice('Request rejected.')
+                    window.setTimeout(() => setHostNotice(null), 4000)
+                  }}
+                />
+              ) : null}
+            </div>
+          ) : null
+        }
+        stage={<StreamParticipantGrid tiles={gridTiles} />}
+        chatPanel={
+          <ChatPanel
+            variant="meeting"
+            messages={chat.messages}
+            loading={chat.loading}
+            sending={chat.sending}
+            error={chat.error}
+            onSend={chat.send}
           />
-        </div>
-
-        <div className="flex flex-col gap-4">
-          {live.product ? <FeaturedProductCard product={live.product} showAddToCart={false} /> : null}
-          <div className="min-h-[20rem] flex-1">
-            <ChatPanel
-              messages={chat.messages}
-              loading={chat.loading}
-              sending={chat.sending}
-              error={chat.error}
-              onSend={chat.send}
-            />
-          </div>
-        </div>
-      </div>
+        }
+        peoplePanel={
+          <ViewerManagementPanel
+            customerCount={presence.customerCount}
+            viewers={presence.viewers}
+            interactionByUserId={interactive.interactionByUserId}
+            pendingRequests={interactive.pendingRequests}
+            busyId={interactive.busyId}
+            error={interactive.actionError}
+            onAcceptRequest={interactive.acceptRequest}
+            onRejectRequest={interactive.rejectRequest}
+            onInvite={interactive.invite}
+            onReturnToAudience={interactive.returnToAudience}
+          />
+        }
+        productPanel={
+          live.product ? (
+            <FeaturedProductCard product={live.product} showAddToCart={false} />
+          ) : null
+        }
+        controls={{
+          isHost: true,
+          connected,
+          micMuted,
+          cameraOff,
+          canSwitchCamera,
+          ending,
+          liveEnded: !isLive,
+          onToggleMic: () => void toggleMic(),
+          onToggleCamera: () => void toggleCamera(),
+          onSwitchCamera: () => void switchCamera(),
+          onFullscreen: handleFullscreen,
+          onEndOrLeave: () => void handleEnd(),
+        }}
+      />
     </AppShell>
   )
 }

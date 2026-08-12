@@ -4,6 +4,21 @@ export type ProductStatus = 'active' | 'inactive'
 
 export type LiveStatus = 'scheduled' | 'live' | 'ended'
 
+export type InteractionMode = 'audio' | 'audio_video'
+
+export type InteractionOrigin = 'request' | 'invite'
+
+export type InteractionStatus =
+  | 'pending'
+  | 'accepted'
+  | 'active'
+  | 'rejected'
+  | 'cancelled'
+  | 'expired'
+  | 'ended'
+
+export type ParticipantRole = 'speaker' | 'cohost'
+
 export interface Profile {
   id: string
   name: string
@@ -41,6 +56,25 @@ export interface Message {
   created_at: string
 }
 
+export interface LiveInteraction {
+  id: string
+  live_id: string
+  user_id: string
+  mode: InteractionMode
+  origin: InteractionOrigin
+  status: InteractionStatus
+  participant_role: ParticipantRole | null
+  created_at: string
+  updated_at: string
+  expires_at: string | null
+  responded_at: string | null
+  ended_at: string | null
+}
+
+export interface LiveInteractionWithUser extends LiveInteraction {
+  user?: Pick<Profile, 'id' | 'name' | 'avatar'> | null
+}
+
 export interface MessageWithSender extends Message {
   sender?: Pick<Profile, 'id' | 'name' | 'avatar'> | null
 }
@@ -76,6 +110,9 @@ export interface AgoraTokenResponse {
   role: 'host' | 'audience'
   expiresAt: number
 }
+
+/** Recommended max simultaneous Speakers/Co-hosts per live (enforced in RPCs). */
+export const MAX_ACTIVE_PARTICIPANTS = 4
 
 export interface Database {
   public: {
@@ -187,9 +224,91 @@ export interface Database {
           },
         ]
       }
+      live_interactions: {
+        Row: LiveInteraction
+        Insert: {
+          id?: string
+          live_id: string
+          user_id: string
+          mode: InteractionMode
+          origin: InteractionOrigin
+          status: InteractionStatus
+          participant_role?: ParticipantRole | null
+          created_at?: string
+          updated_at?: string
+          expires_at?: string | null
+          responded_at?: string | null
+          ended_at?: string | null
+        }
+        Update: {
+          mode?: InteractionMode
+          status?: InteractionStatus
+          participant_role?: ParticipantRole | null
+          expires_at?: string | null
+          responded_at?: string | null
+          ended_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: 'live_interactions_live_id_fkey'
+            columns: ['live_id']
+            isOneToOne: false
+            referencedRelation: 'live_sessions'
+            referencedColumns: ['id']
+          },
+          {
+            foreignKeyName: 'live_interactions_user_id_fkey'
+            columns: ['user_id']
+            isOneToOne: false
+            referencedRelation: 'profiles'
+            referencedColumns: ['id']
+          },
+        ]
+      }
     }
     Views: Record<string, never>
-    Functions: Record<string, never>
+    Functions: {
+      request_to_speak: {
+        Args: { p_live_id: string; p_mode: InteractionMode }
+        Returns: LiveInteraction
+      }
+      cancel_speak_request: {
+        Args: { p_interaction_id: string }
+        Returns: LiveInteraction
+      }
+      respond_to_speak_request: {
+        Args: { p_interaction_id: string; p_accept: boolean }
+        Returns: LiveInteraction
+      }
+      invite_to_speak: {
+        Args: { p_live_id: string; p_user_id: string; p_mode: InteractionMode }
+        Returns: LiveInteraction
+      }
+      respond_to_invite: {
+        Args: { p_interaction_id: string; p_accept: boolean }
+        Returns: LiveInteraction
+      }
+      confirm_participant_media: {
+        Args: { p_interaction_id: string }
+        Returns: LiveInteraction
+      }
+      end_intervention: {
+        Args: { p_interaction_id: string }
+        Returns: LiveInteraction
+      }
+      end_intervention_for_user: {
+        Args: { p_live_id: string; p_user_id: string }
+        Returns: number
+      }
+      expire_stale_live_interactions: {
+        Args: { p_live_id?: string | null }
+        Returns: number
+      }
+      user_can_publish_on_live: {
+        Args: { p_live_id: string; p_user_id: string }
+        Returns: boolean
+      }
+    }
     Enums: Record<string, never>
     CompositeTypes: Record<string, never>
   }

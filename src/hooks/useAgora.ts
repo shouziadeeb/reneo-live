@@ -1,26 +1,40 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import AgoraRTC, {
   type IAgoraRTCClient,
+  type IAgoraRTCRemoteUser,
   type ICameraVideoTrack,
   type IMicrophoneAudioTrack,
   type IRemoteAudioTrack,
   type IRemoteVideoTrack,
 } from 'agora-rtc-sdk-ng'
-import { AgoraTokenError, fetchAgoraToken } from '../lib/agora'
+import { AgoraTokenError, fetchAgoraToken, uidFromUserId } from '../lib/agora'
+import type { InteractionMode } from '../types'
 
 AgoraRTC.setLogLevel(3)
 
 export type AgoraRole = 'host' | 'audience'
 
+export interface RemoteParticipantMedia {
+  uid: number
+  hasAudio: boolean
+  hasVideo: boolean
+  isSessionHost: boolean
+}
+
 interface UseAgoraOptions {
   liveId: string | null
+  /** Initial join role. Session host joins as host; viewers join as audience. */
   role: AgoraRole
   enabled: boolean
+  /** Profile id of the live session host — used to pin the main broadcast tile. */
+  hostUserId?: string | null
 }
 
 interface UseAgoraResult {
   localVideoRef: RefObject<HTMLDivElement | null>
   remoteVideoRef: RefObject<HTMLDivElement | null>
+  /** Container refs keyed by remote uid for co-host video tiles. */
+  bindRemoteVideoEl: (uid: number, el: HTMLDivElement | null) => void
   connecting: boolean
   connected: boolean
   error: string | null
@@ -30,6 +44,11 @@ interface UseAgoraResult {
   viewerCount: number | null
   reconnecting: boolean
   needsTapToPlay: boolean
+  /** Current Agora client role after any in-channel promotion/demotion. */
+  clientRole: AgoraRole
+  publishing: boolean
+  publishError: string | null
+  remoteParticipants: RemoteParticipantMedia[]
   toggleMic: () => Promise<void>
   toggleCamera: () => Promise<void>
   switchCamera: () => Promise<void>
@@ -37,6 +56,13 @@ interface UseAgoraResult {
   retry: () => void
   resumePlayback: () => void
   canSwitchCamera: boolean
+  /**
+   * Explicit consent path: renew publisher token → setClientRole(host) →
+   * create tracks → publish. Never called implicitly on accept/invite.
+   */
+  publishAsParticipant: (mode: InteractionMode) => Promise<void>
+  /** Unpublish local media and return to audience without leaving the channel. */
+  unpublishAsParticipant: () => Promise<void>
 }
 
 function isPermissionDenied(error: unknown): boolean {
@@ -113,14 +139,36 @@ function friendlyAgoraError(error: unknown): string {
   return message || 'Failed to connect to the live stream.'
 }
 
-export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraResult {
+function syncRemoteParticipants(
+  client: IAgoraRTCClient,
+  hostUid: number | null,
+  setRemoteParticipants: (next: RemoteParticipantMedia[]) => void,
+) {
+  const next: RemoteParticipantMedia[] = client.remoteUsers.map((user) => ({
+    uid: Number(user.uid),
+    hasAudio: Boolean(user.hasAudio),
+    hasVideo: Boolean(user.hasVideo),
+    isSessionHost: hostUid != null && Number(user.uid) === hostUid,
+  }))
+  setRemoteParticipants(next)
+}
+
+export function useAgora({
+  liveId,
+  role,
+  enabled,
+  hostUserId = null,
+}: UseAgoraOptions): UseAgoraResult {
   const localVideoRef = useRef<HTMLDivElement | null>(null)
   const remoteVideoRef = useRef<HTMLDivElement | null>(null)
+  const remoteTileElsRef = useRef<Map<number, HTMLDivElement>>(new Map())
   const clientRef = useRef<IAgoraRTCClient | null>(null)
   const micTrackRef = useRef<IMicrophoneAudioTrack | null>(null)
   const camTrackRef = useRef<ICameraVideoTrack | null>(null)
-  const remoteAudioRef = useRef<IRemoteAudioTrack | null>(null)
-  const remoteVideoTrackRef = useRef<IRemoteVideoTrack | null>(null)
+  const remoteAudioTracksRef = useRef<Map<number, IRemoteAudioTrack>>(new Map())
+  const remoteVideoTracksRef = useRef<Map<number, IRemoteVideoTrack>>(new Map())
+  const hostUidRef = useRef<number | null>(hostUserId ? uidFromUserId(hostUserId) : null)
+  const initialRoleRef = useRef<AgoraRole>(role)
 
   const [connecting, setConnecting] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -133,8 +181,41 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
   const [retryKey, setRetryKey] = useState(0)
   const [reconnecting, setReconnecting] = useState(false)
   const [needsTapToPlay, setNeedsTapToPlay] = useState(false)
+  const [clientRole, setClientRole] = useState<AgoraRole>(role)
+  const [publishing, setPublishing] = useState(false)
+  const [publishError, setPublishError] = useState<string | null>(null)
+  const [remoteParticipants, setRemoteParticipants] = useState<RemoteParticipantMedia[]>([])
 
-  const cleanupTracks = useCallback(async () => {
+  useEffect(() => {
+    hostUidRef.current = hostUserId ? uidFromUserId(hostUserId) : null
+    initialRoleRef.current = role
+  }, [hostUserId, role])
+
+  const playRemoteVideo = useCallback((uid: number, track: IRemoteVideoTrack) => {
+    const hostUid = hostUidRef.current
+    const isHost = hostUid != null && uid === hostUid
+    const el = isHost
+      ? remoteVideoRef.current
+      : remoteTileElsRef.current.get(uid) ?? null
+    if (el) {
+      track.play(el)
+    }
+  }, [])
+
+  const bindRemoteVideoEl = useCallback(
+    (uid: number, el: HTMLDivElement | null) => {
+      if (el) {
+        remoteTileElsRef.current.set(uid, el)
+        const track = remoteVideoTracksRef.current.get(uid)
+        if (track) track.play(el)
+      } else {
+        remoteTileElsRef.current.delete(uid)
+      }
+    },
+    [],
+  )
+
+  const cleanupLocalTracks = useCallback(async () => {
     micTrackRef.current?.stop()
     micTrackRef.current?.close()
     micTrackRef.current = null
@@ -143,13 +224,26 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
     camTrackRef.current?.close()
     camTrackRef.current = null
 
-    remoteAudioRef.current?.stop()
-    remoteAudioRef.current = null
-    remoteVideoTrackRef.current?.stop()
-    remoteVideoTrackRef.current = null
-
     if (localVideoRef.current) localVideoRef.current.innerHTML = ''
+    setMicMuted(false)
+    setCameraOff(false)
+    setCanSwitchCamera(false)
+    setPublishing(false)
+  }, [])
+
+  const cleanupRemoteMedia = useCallback(() => {
+    for (const track of remoteAudioTracksRef.current.values()) {
+      track.stop()
+    }
+    remoteAudioTracksRef.current.clear()
+
+    for (const track of remoteVideoTracksRef.current.values()) {
+      track.stop()
+    }
+    remoteVideoTracksRef.current.clear()
+
     if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = ''
+    setRemoteParticipants([])
   }, [])
 
   const leave = useCallback(async () => {
@@ -160,32 +254,38 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
         await client.leave()
       }
     } finally {
-      await cleanupTracks()
+      await cleanupLocalTracks()
+      cleanupRemoteMedia()
       clientRef.current = null
       setConnected(false)
       setConnecting(false)
       setViewerCount(null)
       setReconnecting(false)
       setNeedsTapToPlay(false)
+      setClientRole(initialRoleRef.current)
+      setPublishError(null)
     }
-  }, [cleanupTracks])
+  }, [cleanupLocalTracks, cleanupRemoteMedia])
 
   const retry = useCallback(() => {
     setError(null)
     setWarning(null)
+    setPublishError(null)
     setRetryKey((key) => key + 1)
   }, [])
 
   const resumePlayback = useCallback(() => {
-    remoteAudioRef.current?.play()
-    if (remoteVideoTrackRef.current && remoteVideoRef.current) {
-      remoteVideoTrackRef.current.play(remoteVideoRef.current)
+    for (const track of remoteAudioTracksRef.current.values()) {
+      track.play()
+    }
+    for (const [uid, track] of remoteVideoTracksRef.current.entries()) {
+      playRemoteVideo(uid, track)
     }
     if (camTrackRef.current && localVideoRef.current) {
       camTrackRef.current.play(localVideoRef.current)
     }
     setNeedsTapToPlay(false)
-  }, [])
+  }, [playRemoteVideo])
 
   useEffect(() => {
     if (!enabled || !liveId) return
@@ -196,8 +296,11 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
       setConnecting(true)
       setError(null)
       setWarning(null)
+      setPublishError(null)
       setReconnecting(false)
       setNeedsTapToPlay(false)
+      setClientRole(role)
+      setRemoteParticipants([])
 
       try {
         const tokenPayload = await fetchAgoraToken(liveId!, role)
@@ -209,43 +312,61 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
         })
         clientRef.current = client
 
-        // Explicit broadcaster vs audience: audience cannot publish in live mode.
         await client.setClientRole(role === 'host' ? 'host' : 'audience')
 
-        client.on('user-published', async (user, mediaType) => {
-          await client.subscribe(user, mediaType)
-          if (mediaType === 'video' && user.videoTrack) {
-            remoteVideoTrackRef.current = user.videoTrack
-            if (remoteVideoRef.current) {
-              user.videoTrack.play(remoteVideoRef.current)
-            }
-          }
-          if (mediaType === 'audio' && user.audioTrack) {
-            remoteAudioRef.current = user.audioTrack
-            user.audioTrack.play()
-          }
-        })
-
-        client.on('user-unpublished', (_user, mediaType) => {
-          if (mediaType === 'video') {
-            remoteVideoTrackRef.current?.stop()
-            remoteVideoTrackRef.current = null
-            if (remoteVideoRef.current) remoteVideoRef.current.innerHTML = ''
-          }
-          if (mediaType === 'audio') {
-            remoteAudioRef.current?.stop()
-            remoteAudioRef.current = null
-          }
-        })
-
-        const updateCount = () => {
-          setViewerCount(client.remoteUsers.length + 1)
+        const refreshRemotes = () => {
+          if (!clientRef.current) return
+          syncRemoteParticipants(clientRef.current, hostUidRef.current, setRemoteParticipants)
+          setViewerCount(clientRef.current.remoteUsers.length + 1)
         }
 
-        client.on('user-joined', updateCount)
-        client.on('user-left', updateCount)
+        client.on('user-published', async (user: IAgoraRTCRemoteUser, mediaType) => {
+          await client.subscribe(user, mediaType)
+          const uid = Number(user.uid)
 
-        client.on('connection-state-change', (cur: string, _prev: string, reason?: string) => {
+          if (mediaType === 'video' && user.videoTrack) {
+            remoteVideoTracksRef.current.set(uid, user.videoTrack)
+            playRemoteVideo(uid, user.videoTrack)
+          }
+          if (mediaType === 'audio' && user.audioTrack) {
+            remoteAudioTracksRef.current.set(uid, user.audioTrack)
+            user.audioTrack.play()
+          }
+          refreshRemotes()
+        })
+
+        client.on('user-unpublished', (user, mediaType) => {
+          const uid = Number(user.uid)
+          if (mediaType === 'video') {
+            remoteVideoTracksRef.current.get(uid)?.stop()
+            remoteVideoTracksRef.current.delete(uid)
+            const hostUid = hostUidRef.current
+            if (hostUid != null && uid === hostUid && remoteVideoRef.current) {
+              remoteVideoRef.current.innerHTML = ''
+            }
+            const tile = remoteTileElsRef.current.get(uid)
+            if (tile) tile.innerHTML = ''
+          }
+          if (mediaType === 'audio') {
+            remoteAudioTracksRef.current.get(uid)?.stop()
+            remoteAudioTracksRef.current.delete(uid)
+          }
+          refreshRemotes()
+        })
+
+        client.on('user-joined', refreshRemotes)
+        client.on('user-left', (user) => {
+          const uid = Number(user.uid)
+          remoteAudioTracksRef.current.get(uid)?.stop()
+          remoteAudioTracksRef.current.delete(uid)
+          remoteVideoTracksRef.current.get(uid)?.stop()
+          remoteVideoTracksRef.current.delete(uid)
+          refreshRemotes()
+        })
+
+        client.on(
+          'connection-state-change',
+          (cur: string, _prev: string, reason?: string) => {
             if (cancelled) return
             if (cur === 'RECONNECTING' || cur === 'DISCONNECTING') {
               setReconnecting(true)
@@ -277,6 +398,25 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
         if (cancelled) {
           await client.leave()
           return
+        }
+
+        // Subscribe to anyone already publishing (host joined first case).
+        for (const user of client.remoteUsers) {
+          if (user.hasVideo) {
+            await client.subscribe(user, 'video')
+            if (user.videoTrack) {
+              const uid = Number(user.uid)
+              remoteVideoTracksRef.current.set(uid, user.videoTrack)
+              playRemoteVideo(uid, user.videoTrack)
+            }
+          }
+          if (user.hasAudio) {
+            await client.subscribe(user, 'audio')
+            if (user.audioTrack) {
+              remoteAudioTracksRef.current.set(Number(user.uid), user.audioTrack)
+              user.audioTrack.play()
+            }
+          }
         }
 
         if (role === 'host') {
@@ -327,13 +467,14 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
 
           if (toPublish.length > 0) {
             await client.publish(toPublish)
+            setPublishing(true)
           }
 
           const cameras = await AgoraRTC.getCameras().catch(() => [])
           setCanSwitchCamera(cameras.length > 1)
         }
 
-        updateCount()
+        refreshRemotes()
         setConnected(true)
       } catch (err) {
         if (!cancelled) {
@@ -352,7 +493,7 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
       AgoraRTC.onAutoplayFailed = () => undefined
       void leave()
     }
-  }, [enabled, liveId, role, leave, retryKey])
+  }, [enabled, liveId, role, leave, retryKey, playRemoteVideo])
 
   useEffect(() => {
     function handleOffline() {
@@ -373,23 +514,23 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
 
   const toggleMic = useCallback(async () => {
     const track = micTrackRef.current
-    if (!track || role !== 'host') return
+    if (!track || !publishing) return
     const next = !micMuted
     await track.setEnabled(!next)
     setMicMuted(next)
-  }, [micMuted, role])
+  }, [micMuted, publishing])
 
   const toggleCamera = useCallback(async () => {
     const track = camTrackRef.current
-    if (!track || role !== 'host') return
+    if (!track || !publishing) return
     const next = !cameraOff
     await track.setEnabled(!next)
     setCameraOff(next)
-  }, [cameraOff, role])
+  }, [cameraOff, publishing])
 
   const switchCamera = useCallback(async () => {
     const track = camTrackRef.current
-    if (!track || role !== 'host' || !canSwitchCamera) return
+    if (!track || !publishing || !canSwitchCamera) return
     const cameras = await AgoraRTC.getCameras()
     if (cameras.length < 2) return
     const currentId = track.getTrackLabel()
@@ -398,11 +539,117 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
     if (nextCamera?.deviceId) {
       await track.setDevice(nextCamera.deviceId)
     }
-  }, [canSwitchCamera, role])
+  }, [canSwitchCamera, publishing])
+
+  const publishAsParticipant = useCallback(
+    async (mode: InteractionMode) => {
+      const client = clientRef.current
+      if (!client || !liveId) {
+        throw new Error('Not connected to the live stream.')
+      }
+      if (initialRoleRef.current === 'host') {
+        throw new Error('Session host is already publishing.')
+      }
+
+      setPublishError(null)
+      setWarning(null)
+
+      try {
+        // 1) Server must authorize a publisher token (checks live_interactions).
+        const tokenPayload = await fetchAgoraToken(liveId, 'host')
+        await client.renewToken(tokenPayload.token)
+
+        // 2) Upgrade in-channel role — do NOT leave/rejoin (keeps main broadcast stable).
+        await client.setClientRole('host')
+        setClientRole('host')
+
+        let micTrack: IMicrophoneAudioTrack | null = null
+        let camTrack: ICameraVideoTrack | null = null
+
+        try {
+          micTrack = await AgoraRTC.createMicrophoneAudioTrack()
+        } catch (err) {
+          throw new Error(microphoneErrorMessage(err))
+        }
+
+        if (mode === 'audio_video') {
+          try {
+            camTrack = await AgoraRTC.createCameraVideoTrack()
+          } catch (err) {
+            micTrack.close()
+            throw new Error(cameraErrorMessage(err))
+          }
+        }
+
+        micTrackRef.current = micTrack
+        camTrackRef.current = camTrack
+
+        if (camTrack && localVideoRef.current) {
+          camTrack.play(localVideoRef.current)
+        }
+
+        const toPublish: Array<IMicrophoneAudioTrack | ICameraVideoTrack> = [micTrack]
+        if (camTrack) toPublish.push(camTrack)
+        await client.publish(toPublish)
+
+        setPublishing(true)
+        setMicMuted(false)
+        setCameraOff(false)
+
+        if (camTrack) {
+          const cameras = await AgoraRTC.getCameras().catch(() => [])
+          setCanSwitchCamera(cameras.length > 1)
+        }
+      } catch (err) {
+        await cleanupLocalTracks()
+        try {
+          const audienceToken = await fetchAgoraToken(liveId, 'audience')
+          await client.renewToken(audienceToken.token)
+          await client.setClientRole('audience')
+          setClientRole('audience')
+        } catch {
+          // stay in safest recoverable UI state
+          setClientRole('audience')
+        }
+        const message = friendlyAgoraError(err)
+        setPublishError(message)
+        throw new Error(message)
+      }
+    },
+    [cleanupLocalTracks, liveId],
+  )
+
+  const unpublishAsParticipant = useCallback(async () => {
+    const client = clientRef.current
+    if (!client || !liveId) return
+    if (initialRoleRef.current === 'host') return
+
+    try {
+      const tracks = [micTrackRef.current, camTrackRef.current].filter(
+        Boolean,
+      ) as Array<IMicrophoneAudioTrack | ICameraVideoTrack>
+      if (tracks.length > 0) {
+        await client.unpublish(tracks).catch(() => undefined)
+      }
+      await cleanupLocalTracks()
+
+      // Return to audience in the same channel — no leave/rejoin.
+      const audienceToken = await fetchAgoraToken(liveId, 'audience')
+      await client.renewToken(audienceToken.token)
+      await client.setClientRole('audience')
+      setClientRole('audience')
+      setPublishError(null)
+    } catch (err) {
+      setPublishError(friendlyAgoraError(err))
+      await cleanupLocalTracks()
+      setClientRole('audience')
+    }
+  }, [cleanupLocalTracks, liveId])
 
   return {
     localVideoRef,
     remoteVideoRef,
+    bindRemoteVideoEl,
     connecting,
     connected,
     error,
@@ -412,6 +659,10 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
     viewerCount,
     reconnecting,
     needsTapToPlay,
+    clientRole,
+    publishing,
+    publishError,
+    remoteParticipants,
     toggleMic,
     toggleCamera,
     switchCamera,
@@ -419,5 +670,7 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
     retry,
     resumePlayback,
     canSwitchCamera,
+    publishAsParticipant,
+    unpublishAsParticipant,
   }
 }
