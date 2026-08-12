@@ -1,6 +1,6 @@
 # Reneo Live Supabase
 
-Apply `migrations/20260326000001_init.sql` to your project, then deploy:
+Apply `migrations/` in order, then deploy:
 
 ```bash
 supabase functions deploy agora-token
