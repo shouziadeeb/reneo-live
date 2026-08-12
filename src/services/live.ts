@@ -2,18 +2,27 @@ import type { LiveSession, LiveSessionWithDetails } from '../types'
 import { supabase } from '../lib/supabase'
 
 export async function startLiveSession(productId: string): Promise<LiveSession> {
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser()
+
+  if (userError || !user) {
+    throw new Error('You must be signed in to start a live session.')
+  }
+
   const { data, error } = await supabase
     .from('live_sessions')
     .insert({
       product_id: productId,
-      host_id: (await supabase.auth.getUser()).data.user?.id ?? '',
+      host_id: user.id,
       status: 'live',
     })
     .select('*')
     .single()
 
   if (error) throw new Error(error.message)
-  return data
+  return data as LiveSession
 }
 
 export async function endLiveSession(liveId: string): Promise<LiveSession> {
