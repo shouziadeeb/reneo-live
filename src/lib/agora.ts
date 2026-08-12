@@ -30,15 +30,20 @@ export async function fetchAgoraToken(
     throw new Error('You must be signed in to join a live session.')
   }
 
-  const { data, error } = await supabase.functions.invoke<AgoraTokenResponse>('agora-token', {
-    body: { liveId, role },
-  })
+  const { data, error } = await supabase.functions.invoke<AgoraTokenResponse | { error: string; code?: string }>(
+    'agora-token',
+    { body: { liveId, role } },
+  )
 
   if (error) {
     throw new Error(error.message || 'Failed to get Agora token.')
   }
 
-  if (!data?.token || !data.appId) {
+  if (data && 'code' in data && 'error' in data && !('token' in data)) {
+    throw new Error(`${data.error}${data.code ? ` (${data.code})` : ''}`)
+  }
+
+  if (!data || !('token' in data) || !data.token || !data.appId) {
     throw new Error('Invalid token response from server.')
   }
 
