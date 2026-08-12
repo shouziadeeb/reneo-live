@@ -111,6 +111,62 @@ begin
 end;
 $$;
 
+alter function public.handle_new_user() owner to postgres;
+
+create or replace function public.ensure_profile()
+returns public.profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  uid uuid := auth.uid();
+  user_record auth.users;
+  chosen_role text;
+  chosen_name text;
+  result public.profiles;
+begin
+  if uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select * into result from public.profiles where id = uid;
+  if found then
+    return result;
+  end if;
+
+  select * into user_record from auth.users where id = uid;
+  if not found then
+    raise exception 'User not found';
+  end if;
+
+  chosen_role := coalesce(user_record.raw_user_meta_data->>'role', 'customer');
+  if chosen_role not in ('seller', 'customer') then
+    chosen_role := 'customer';
+  end if;
+
+  chosen_name := coalesce(
+    nullif(trim(user_record.raw_user_meta_data->>'name'), ''),
+    split_part(user_record.email, '@', 1),
+    'User'
+  );
+
+  insert into public.profiles (id, name, role)
+  values (uid, left(chosen_name, 80), chosen_role)
+  on conflict (id) do nothing
+  returning * into result;
+
+  if result.id is null then
+    select * into result from public.profiles where id = uid;
+  end if;
+
+  return result;
+end;
+$$;
+
+revoke all on function public.ensure_profile() from public;
+grant execute on function public.ensure_profile() to authenticated;
+
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users

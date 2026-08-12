@@ -36,7 +36,12 @@ async function loadProfile(userId: string): Promise<Profile | null> {
     .maybeSingle()
 
   if (error) throw new Error(error.message)
-  return data
+  if (data) return data
+
+  // Profile is created by DB trigger; this RPC backfills if it was missed.
+  const { data: ensured, error: ensureError } = await supabase.rpc('ensure_profile')
+  if (ensureError) throw new Error(ensureError.message)
+  return ensured as Profile
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -135,21 +140,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (error) throw new Error(error.message)
       if (!data.user) throw new Error('Signup failed. Please try again.')
 
-      // Ensure profile exists even if the DB trigger is delayed
-      const { error: profileError } = await supabase.from('profiles').upsert(
-        {
-          id: data.user.id,
-          name,
-          role: input.role,
-        },
-        { onConflict: 'id' },
-      )
-
-      if (profileError) {
-        // Trigger may have already inserted; ignore unique conflicts
-        if (!profileError.message.toLowerCase().includes('duplicate')) {
-          throw new Error(profileError.message)
-        }
+      // Profile is created server-side by the auth.users trigger.
+      // Do not insert from the client here — without a session (email confirmation),
+      // RLS would reject the row.
+      if (!data.session) {
+        throw new Error(
+          'Account created. Check your email to confirm your address, then sign in.',
+        )
       }
     },
     [],
