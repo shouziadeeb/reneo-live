@@ -5,170 +5,189 @@ import {
   useMemo,
   useState,
   type ReactNode,
-} from 'react'
-import type { Session, User } from '@supabase/supabase-js'
-import type { Profile, UserRole } from '../types'
-import { supabase } from '../lib/supabase'
+} from "react";
+import type { Session, User } from "@supabase/supabase-js";
+import type { Profile, UserRole } from "../types";
+import { supabase } from "../lib/supabase";
 
 interface AuthContextValue {
-  user: User | null
-  session: Session | null
-  profile: Profile | null
-  loading: boolean
-  sendOtp: (input: {
-    email: string
-    name?: string
-    role?: UserRole
-    isSignup: boolean
-  }) => Promise<void>
-  verifyOtp: (email: string, token: string) => Promise<void>
-  signOut: () => Promise<void>
-  refreshProfile: () => Promise<void>
+  user: User | null;
+  session: Session | null;
+  profile: Profile | null;
+  loading: boolean;
+  signUp: (input: {
+    email: string;
+    password: string;
+    name: string;
+    role: UserRole;
+  }) => Promise<void>;
+  signIn: (email: string, password: string) => Promise<void>;
+  signOut: () => Promise<void>;
+  refreshProfile: () => Promise<void>;
 }
 
-export const AuthContext = createContext<AuthContextValue | undefined>(undefined)
+export const AuthContext = createContext<AuthContextValue | undefined>(
+  undefined,
+);
+
+function isExpiredSessionError(error: unknown): boolean {
+  const message =
+    error instanceof Error ? error.message : String(error ?? "");
+  return /jwt|expired|invalid claim|session|not authenticated|unauthorized/i.test(
+    message,
+  );
+}
 
 async function loadProfile(userId: string): Promise<Profile | null> {
   const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .maybeSingle()
+    .from("profiles")
+    .select("*")
+    .eq("id", userId)
+    .maybeSingle();
 
-  if (error) throw new Error(error.message)
-  if (data) return data
+  if (error) throw new Error(error.message);
+  if (data) return data;
 
-  const { data: ensured, error: ensureError } = await supabase.rpc('ensure_profile')
-  if (ensureError) throw new Error(ensureError.message)
-  return ensured as Profile
+  // Profile is created by DB trigger; this RPC backfills if it was missed.
+  const { data: ensured, error: ensureError } =
+    await supabase.rpc("ensure_profile");
+  if (ensureError) throw new Error(ensureError.message);
+  return ensured as Profile;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null)
-  const [session, setSession] = useState<Session | null>(null)
-  const [profile, setProfile] = useState<Profile | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const refreshProfile = useCallback(async () => {
     if (!user) {
-      setProfile(null)
-      return
+      setProfile(null);
+      return;
     }
-    const next = await loadProfile(user.id)
-    setProfile(next)
-  }, [user])
+    const next = await loadProfile(user.id);
+    setProfile(next);
+  }, [user]);
 
   useEffect(() => {
-    let mounted = true
+    let mounted = true;
 
     async function init() {
       try {
-        const { data, error } = await supabase.auth.getSession()
-        if (error) throw error
-        if (!mounted) return
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (!mounted) return;
 
-        setSession(data.session)
-        setUser(data.session?.user ?? null)
+        setSession(data.session);
+        setUser(data.session?.user ?? null);
 
         if (data.session?.user) {
-          const nextProfile = await loadProfile(data.session.user.id)
-          if (mounted) setProfile(nextProfile)
+          const nextProfile = await loadProfile(data.session.user.id);
+          if (mounted) setProfile(nextProfile);
         }
       } catch (error) {
-        console.error(error)
+        console.error(error);
         if (mounted) {
-          setSession(null)
-          setUser(null)
-          setProfile(null)
+          setSession(null);
+          setUser(null);
+          setProfile(null);
+          if (isExpiredSessionError(error)) {
+            await supabase.auth.signOut().catch(() => undefined);
+          }
         }
       } finally {
-        if (mounted) setLoading(false)
+        if (mounted) setLoading(false);
       }
     }
 
-    void init()
+    void init();
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
-      setSession(nextSession)
-      setUser(nextSession?.user ?? null)
+      setSession(nextSession);
+      setUser(nextSession?.user ?? null);
 
-      if (event === 'SIGNED_OUT' || !nextSession?.user) {
-        setProfile(null)
-        setLoading(false)
-        return
+      if (event === "SIGNED_OUT" || !nextSession?.user) {
+        setProfile(null);
+        setLoading(false);
+        return;
       }
 
       try {
-        const nextProfile = await loadProfile(nextSession.user.id)
-        setProfile(nextProfile)
+        const nextProfile = await loadProfile(nextSession.user.id);
+        setProfile(nextProfile);
       } catch (error) {
-        console.error(error)
-        setProfile(null)
+        console.error(error);
+        setProfile(null);
+        if (isExpiredSessionError(error)) {
+          setSession(null);
+          setUser(null);
+          await supabase.auth.signOut().catch(() => undefined);
+        }
       } finally {
-        setLoading(false)
+        setLoading(false);
       }
-    })
+    });
 
     return () => {
-      mounted = false
-      subscription.unsubscribe()
-    }
-  }, [])
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
-  const sendOtp = useCallback(
+  const signUp = useCallback(
     async (input: {
-      email: string
-      name?: string
-      role?: UserRole
-      isSignup: boolean
+      email: string;
+      password: string;
+      name: string;
+      role: UserRole;
     }) => {
-      const email = input.email.trim()
-      if (!email) throw new Error('Email is required.')
-
-      if (input.isSignup) {
-        if (!input.name?.trim()) throw new Error('Name is required.')
-        if (!input.role) throw new Error('Please choose seller or customer.')
+      const name = input.name.trim();
+      if (!name) throw new Error("Name is required.");
+      if (input.password.length < 6) {
+        throw new Error("Password must be at least 6 characters.");
       }
 
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
+      const { data, error } = await supabase.auth.signUp({
+        email: input.email.trim(),
+        password: input.password,
         options: {
-          shouldCreateUser: input.isSignup,
-          data: input.isSignup
-            ? {
-                name: input.name!.trim(),
-                role: input.role,
-              }
-            : undefined,
+          data: {
+            name,
+            role: input.role,
+          },
         },
-      })
+      });
 
-      if (error) throw new Error(error.message)
+      if (error) throw new Error(error.message);
+      if (!data.user) throw new Error("Signup failed. Please try again.");
+
+      // Profile is created server-side by the auth.users trigger.
+      // Do not insert from the client here — without a session (email confirmation),
+      // RLS would reject the row.
+      if (!data.session) {
+        throw new Error(
+          "Account created. Check your email to confirm your address, then sign in.",
+        );
+      }
     },
     [],
-  )
+  );
 
-  const verifyOtp = useCallback(async (email: string, token: string) => {
-    const code = token.trim()
-    if (code.length !== 6) {
-      throw new Error('Enter the 6-digit code from your email.')
-    }
-
-    const { error } = await supabase.auth.verifyOtp({
+  const signIn = useCallback(async (email: string, password: string) => {
+    const { error } = await supabase.auth.signInWithPassword({
       email: email.trim(),
-      token: code,
-      type: 'email',
-    })
-
-    if (error) throw new Error(error.message)
-  }, [])
+      password,
+    });
+    if (error) throw new Error(error.message);
+  }, []);
 
   const signOut = useCallback(async () => {
-    const { error } = await supabase.auth.signOut()
-    if (error) throw new Error(error.message)
-  }, [])
+    const { error } = await supabase.auth.signOut();
+    if (error) throw new Error(error.message);
+  }, []);
 
   const value = useMemo(
     () => ({
@@ -176,13 +195,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       profile,
       loading,
-      sendOtp,
-      verifyOtp,
+      signUp,
+      signIn,
       signOut,
       refreshProfile,
     }),
-    [user, session, profile, loading, sendOtp, verifyOtp, signOut, refreshProfile],
-  )
+    [user, session, profile, loading, signUp, signIn, signOut, refreshProfile],
+  );
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

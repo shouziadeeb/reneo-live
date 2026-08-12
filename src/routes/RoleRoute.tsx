@@ -1,9 +1,10 @@
 import { Navigate, Outlet } from 'react-router-dom'
 import type { UserRole } from '../types'
 import { useAuth } from '../hooks/useAuth'
+import { Button } from '../components/ui'
 
 export function RoleRoute({ role }: { role: UserRole }) {
-  const { profile, loading, user } = useAuth()
+  const { profile, loading, user, signOut, refreshProfile } = useAuth()
 
   if (loading) {
     return (
@@ -23,8 +24,17 @@ export function RoleRoute({ role }: { role: UserRole }) {
         <div>
           <h1 className="font-display text-2xl text-[var(--ink)]">Profile missing</h1>
           <p className="mt-2 text-sm text-[var(--muted)]">
-            Your account authenticated, but no profile was found. Sign out and sign up again.
+            Your account authenticated, but no profile was found. Sign out and sign in again.
+            If this continues, your session may have expired.
           </p>
+          <div className="mt-4 flex justify-center gap-2">
+            <Button variant="secondary" onClick={() => void refreshProfile()}>
+              Retry
+            </Button>
+            <Button variant="ghost" onClick={() => void signOut()}>
+              Sign out
+            </Button>
+          </div>
         </div>
       </div>
     )
