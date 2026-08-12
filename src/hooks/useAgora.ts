@@ -6,7 +6,7 @@ import AgoraRTC, {
   type IRemoteAudioTrack,
   type IRemoteVideoTrack,
 } from 'agora-rtc-sdk-ng'
-import { fetchAgoraToken } from '../lib/agora'
+import { AgoraTokenError, fetchAgoraToken } from '../lib/agora'
 
 AgoraRTC.setLogLevel(3)
 
@@ -24,30 +24,90 @@ interface UseAgoraResult {
   connecting: boolean
   connected: boolean
   error: string | null
+  warning: string | null
   micMuted: boolean
   cameraOff: boolean
   viewerCount: number | null
+  reconnecting: boolean
+  needsTapToPlay: boolean
   toggleMic: () => Promise<void>
   toggleCamera: () => Promise<void>
   switchCamera: () => Promise<void>
   leave: () => Promise<void>
+  retry: () => void
+  resumePlayback: () => void
   canSwitchCamera: boolean
 }
 
-function friendlyAgoraError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  const lower = message.toLowerCase()
+function isPermissionDenied(error: unknown): boolean {
+  const err = error as { name?: string; code?: string; message?: string }
+  const blob = `${err.name ?? ''} ${err.code ?? ''} ${err.message ?? ''}`.toLowerCase()
+  return (
+    err.name === 'NotAllowedError' ||
+    blob.includes('permission') ||
+    blob.includes('notallowed') ||
+    blob.includes('denied')
+  )
+}
 
-  if (lower.includes('permission') || lower.includes('notallowed')) {
-    return 'Camera or microphone permission was denied. Allow access in your browser settings and try again.'
+function isDeviceMissing(error: unknown): boolean {
+  const err = error as { name?: string; code?: string; message?: string }
+  const blob = `${err.name ?? ''} ${err.code ?? ''} ${err.message ?? ''}`.toLowerCase()
+  return (
+    err.name === 'NotFoundError' ||
+    blob.includes('device not found') ||
+    blob.includes('notfound') ||
+    blob.includes('requested device not found')
+  )
+}
+
+function cameraErrorMessage(error: unknown): string {
+  if (isPermissionDenied(error)) {
+    return 'Camera permission was denied. Please enable camera access in your browser settings.'
   }
-  if (lower.includes('device not found') || lower.includes('notfound')) {
+  if (isDeviceMissing(error)) {
+    return 'No camera was found on this device. Connect a camera and retry.'
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  return message || 'Could not start the camera.'
+}
+
+function microphoneErrorMessage(error: unknown): string {
+  if (isPermissionDenied(error)) {
+    return 'Microphone permission was denied. Enable microphone access in your browser or device settings, then retry.'
+  }
+  if (isDeviceMissing(error)) {
+    return 'No microphone was found. Connect a microphone or check that it is not in use by another app, then retry.'
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  return message || 'Could not start the microphone.'
+}
+
+function friendlyAgoraError(error: unknown): string {
+  if (error instanceof AgoraTokenError) {
+    return error.message
+  }
+
+  const err = error as { name?: string; code?: string | number; message?: string }
+  const message = err.message || (error instanceof Error ? error.message : String(error))
+  const blob = `${err.name ?? ''} ${err.code ?? ''} ${message}`.toLowerCase()
+
+  if (isPermissionDenied(error)) {
+    return 'Camera or microphone permission was denied. Please enable access in your browser settings.'
+  }
+  if (isDeviceMissing(error)) {
     return 'No camera or microphone was found on this device.'
   }
-  if (lower.includes('token')) {
-    return 'Could not authorize the live stream. Please refresh and try again.'
+  if (blob.includes('token') || blob.includes('invalid vendor key') || blob.includes('can_not_get_gateway')) {
+    return 'Could not authorize the live stream. Please retry. If this continues, sign out and sign back in.'
   }
-  if (lower.includes('network') || lower.includes('timeout')) {
+  if (
+    blob.includes('network') ||
+    blob.includes('timeout') ||
+    blob.includes('disconnected') ||
+    blob.includes('websocket') ||
+    blob.includes('offline')
+  ) {
     return 'Network issue while connecting to the live stream. Check your connection and retry.'
   }
   return message || 'Failed to connect to the live stream.'
@@ -65,10 +125,14 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
   const [connecting, setConnecting] = useState(false)
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [warning, setWarning] = useState<string | null>(null)
   const [micMuted, setMicMuted] = useState(false)
   const [cameraOff, setCameraOff] = useState(false)
   const [viewerCount, setViewerCount] = useState<number | null>(null)
   const [canSwitchCamera, setCanSwitchCamera] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
+  const [reconnecting, setReconnecting] = useState(false)
+  const [needsTapToPlay, setNeedsTapToPlay] = useState(false)
 
   const cleanupTracks = useCallback(async () => {
     micTrackRef.current?.stop()
@@ -101,8 +165,27 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
       setConnected(false)
       setConnecting(false)
       setViewerCount(null)
+      setReconnecting(false)
+      setNeedsTapToPlay(false)
     }
   }, [cleanupTracks])
+
+  const retry = useCallback(() => {
+    setError(null)
+    setWarning(null)
+    setRetryKey((key) => key + 1)
+  }, [])
+
+  const resumePlayback = useCallback(() => {
+    remoteAudioRef.current?.play()
+    if (remoteVideoTrackRef.current && remoteVideoRef.current) {
+      remoteVideoTrackRef.current.play(remoteVideoRef.current)
+    }
+    if (camTrackRef.current && localVideoRef.current) {
+      camTrackRef.current.play(localVideoRef.current)
+    }
+    setNeedsTapToPlay(false)
+  }, [])
 
   useEffect(() => {
     if (!enabled || !liveId) return
@@ -112,6 +195,9 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
     async function join() {
       setConnecting(true)
       setError(null)
+      setWarning(null)
+      setReconnecting(false)
+      setNeedsTapToPlay(false)
 
       try {
         const tokenPayload = await fetchAgoraToken(liveId!, role)
@@ -123,6 +209,7 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
         })
         clientRef.current = client
 
+        // Explicit broadcaster vs audience: audience cannot publish in live mode.
         await client.setClientRole(role === 'host' ? 'host' : 'audience')
 
         client.on('user-published', async (user, mediaType) => {
@@ -139,7 +226,7 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
           }
         })
 
-        client.on('user-unpublished', (user, mediaType) => {
+        client.on('user-unpublished', (_user, mediaType) => {
           if (mediaType === 'video') {
             remoteVideoTrackRef.current?.stop()
             remoteVideoTrackRef.current = null
@@ -149,16 +236,36 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
             remoteAudioRef.current?.stop()
             remoteAudioRef.current = null
           }
-          void user
         })
 
         const updateCount = () => {
-          // Host + remote users currently in the RTC channel (reliable via Agora client state)
           setViewerCount(client.remoteUsers.length + 1)
         }
 
         client.on('user-joined', updateCount)
         client.on('user-left', updateCount)
+
+        client.on('connection-state-change', (cur: string, _prev: string, reason?: string) => {
+            if (cancelled) return
+            if (cur === 'RECONNECTING' || cur === 'DISCONNECTING') {
+              setReconnecting(true)
+            } else if (cur === 'CONNECTED') {
+              setReconnecting(false)
+            } else if (cur === 'DISCONNECTED') {
+              setReconnecting(false)
+              if (reason && reason !== 'LEAVE') {
+                setError(
+                  'Connection to the live stream was lost. Check your network and retry.',
+                )
+                setConnected(false)
+              }
+            }
+          },
+        )
+
+        AgoraRTC.onAutoplayFailed = () => {
+          if (!cancelled) setNeedsTapToPlay(true)
+        }
 
         await client.join(
           tokenPayload.appId,
@@ -173,24 +280,56 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
         }
 
         if (role === 'host') {
-          const [micTrack, camTrack] = await AgoraRTC.createMicrophoneAndCameraTracks()
+          let camTrack: ICameraVideoTrack | null = null
+          let micTrack: IMicrophoneAudioTrack | null = null
+          let cameraFailure: unknown
+          let micFailure: unknown
+
+          try {
+            camTrack = await AgoraRTC.createCameraVideoTrack()
+          } catch (err) {
+            cameraFailure = err
+          }
+
+          try {
+            micTrack = await AgoraRTC.createMicrophoneAudioTrack()
+          } catch (err) {
+            micFailure = err
+          }
+
           if (cancelled) {
-            micTrack.close()
-            camTrack.close()
+            camTrack?.close()
+            micTrack?.close()
             await client.leave()
             return
           }
 
-          micTrackRef.current = micTrack
-          camTrackRef.current = camTrack
+          if (cameraFailure) {
+            micTrack?.close()
+            await client.leave()
+            throw new Error(cameraErrorMessage(cameraFailure))
+          }
 
-          if (localVideoRef.current) {
+          camTrackRef.current = camTrack
+          if (localVideoRef.current && camTrack) {
             camTrack.play(localVideoRef.current)
           }
 
-          await client.publish([micTrack, camTrack])
+          const toPublish: Array<ICameraVideoTrack | IMicrophoneAudioTrack> = []
+          if (camTrack) toPublish.push(camTrack)
 
-          const cameras = await AgoraRTC.getCameras()
+          if (micFailure) {
+            setWarning(microphoneErrorMessage(micFailure))
+          } else if (micTrack) {
+            micTrackRef.current = micTrack
+            toPublish.push(micTrack)
+          }
+
+          if (toPublish.length > 0) {
+            await client.publish(toPublish)
+          }
+
+          const cameras = await AgoraRTC.getCameras().catch(() => [])
           setCanSwitchCamera(cameras.length > 1)
         }
 
@@ -210,9 +349,27 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
 
     return () => {
       cancelled = true
+      AgoraRTC.onAutoplayFailed = () => undefined
       void leave()
     }
-  }, [enabled, liveId, role, leave])
+  }, [enabled, liveId, role, leave, retryKey])
+
+  useEffect(() => {
+    function handleOffline() {
+      setReconnecting(true)
+    }
+    function handleOnline() {
+      if (clientRef.current) {
+        setReconnecting(false)
+      }
+    }
+    window.addEventListener('offline', handleOffline)
+    window.addEventListener('online', handleOnline)
+    return () => {
+      window.removeEventListener('offline', handleOffline)
+      window.removeEventListener('online', handleOnline)
+    }
+  }, [])
 
   const toggleMic = useCallback(async () => {
     const track = micTrackRef.current
@@ -249,13 +406,18 @@ export function useAgora({ liveId, role, enabled }: UseAgoraOptions): UseAgoraRe
     connecting,
     connected,
     error,
+    warning,
     micMuted,
     cameraOff,
     viewerCount,
+    reconnecting,
+    needsTapToPlay,
     toggleMic,
     toggleCamera,
     switchCamera,
     leave,
+    retry,
+    resumePlayback,
     canSwitchCamera,
   }
 }
