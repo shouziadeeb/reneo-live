@@ -1,6 +1,23 @@
 import type { LiveSession, LiveSessionWithDetails } from '../types'
 import { supabase } from '../lib/supabase'
 
+function mapLiveError(message: string, fallback: string): Error {
+  const lower = message.toLowerCase()
+  if (/jwt|expired|not authenticated|unauthorized/i.test(message)) {
+    return new Error('Your session expired. Please sign in again.')
+  }
+  if (lower.includes('product not found') || lower.includes('not owned')) {
+    return new Error('That product was not found or is not available to go live.')
+  }
+  if (lower.includes('only sellers')) {
+    return new Error('Only sellers can start a live session.')
+  }
+  if (lower.includes('failed to fetch') || lower.includes('network')) {
+    return new Error('Network request failed. Check your connection and try again.')
+  }
+  return new Error(message || fallback)
+}
+
 export async function startLiveSession(productId: string): Promise<LiveSession> {
   const {
     data: { user },
@@ -21,7 +38,7 @@ export async function startLiveSession(productId: string): Promise<LiveSession> 
     .select('*')
     .single()
 
-  if (error) throw new Error(error.message)
+  if (error) throw mapLiveError(error.message, 'Could not create the live session.')
   return data as LiveSession
 }
 
@@ -36,7 +53,8 @@ export async function endLiveSession(liveId: string): Promise<LiveSession> {
     .select('*')
     .single()
 
-  if (error) throw new Error(error.message)
+  if (error) throw mapLiveError(error.message, 'Could not end the live session.')
+  if (!data) throw new Error('Live session not found or already ended.')
   return data
 }
 

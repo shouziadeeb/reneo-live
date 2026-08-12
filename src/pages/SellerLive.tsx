@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { ChatPanel } from '../components/chat/ChatPanel'
@@ -10,6 +10,29 @@ import { useAuth } from '../hooks/useAuth'
 import { useChat } from '../hooks/useChat'
 import { useLiveSession, useSellerLiveActions } from '../hooks/useLive'
 
+function requestStageFullscreen(node: HTMLDivElement) {
+  if (document.fullscreenElement) {
+    void document.exitFullscreen()
+    return
+  }
+
+  const request = node.requestFullscreen?.bind(node)
+  if (request) {
+    void request().catch(() => {
+      const video = node.querySelector('video') as HTMLVideoElement & {
+        webkitEnterFullscreen?: () => void
+      } | null
+      video?.webkitEnterFullscreen?.()
+    })
+    return
+  }
+
+  const video = node.querySelector('video') as HTMLVideoElement & {
+    webkitEnterFullscreen?: () => void
+  } | null
+  video?.webkitEnterFullscreen?.()
+}
+
 export function SellerLivePage() {
   const { liveId } = useParams<{ liveId: string }>()
   const { user, profile } = useAuth()
@@ -17,6 +40,7 @@ export function SellerLivePage() {
   const stageRef = useRef<HTMLDivElement | null>(null)
   const { live, loading, error } = useLiveSession(liveId)
   const { end, ending } = useSellerLiveActions()
+  const [endError, setEndError] = useState<string | null>(null)
 
   const isHost = Boolean(live && profile && live.host_id === profile.id)
   const isLive = live?.status === 'live'
@@ -30,23 +54,22 @@ export function SellerLivePage() {
   const chat = useChat(isLive ? (liveId ?? null) : null, user?.id ?? null)
 
   const handleFullscreen = useCallback(() => {
-    const node = stageRef.current
-    if (!node) return
-    if (document.fullscreenElement) {
-      void document.exitFullscreen()
-    } else {
-      void node.requestFullscreen()
-    }
+    if (stageRef.current) requestStageFullscreen(stageRef.current)
   }, [])
 
   async function handleEnd() {
     if (!liveId) return
+    setEndError(null)
     try {
-      await agora.leave()
       await end(liveId)
+      await agora.leave().catch(() => undefined)
       navigate('/seller')
     } catch (err) {
-      console.error(err)
+      setEndError(
+        err instanceof Error
+          ? err.message
+          : 'Could not end the live session. Check your connection and try again.',
+      )
     }
   }
 
@@ -89,6 +112,16 @@ export function SellerLivePage() {
       </div>
 
       {!isLive ? <Alert tone="info">This live session has ended.</Alert> : null}
+      {endError ? (
+        <div className="mb-4">
+          <Alert>{endError}</Alert>
+        </div>
+      ) : null}
+      {!live.product ? (
+        <div className="mb-4">
+          <Alert>The featured product is no longer available.</Alert>
+        </div>
+      ) : null}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(18rem,0.9fr)]">
         <div ref={stageRef}>
@@ -97,17 +130,22 @@ export function SellerLivePage() {
             connecting={agora.connecting}
             connected={agora.connected}
             error={agora.error}
+            warning={agora.warning}
             isHost
             sellerName={profile?.name}
             viewerCount={agora.viewerCount}
             micMuted={agora.micMuted}
             cameraOff={agora.cameraOff}
             canSwitchCamera={agora.canSwitchCamera}
+            reconnecting={agora.reconnecting}
+            needsTapToPlay={agora.needsTapToPlay}
             onToggleMic={() => void agora.toggleMic()}
             onToggleCamera={() => void agora.toggleCamera()}
             onSwitchCamera={() => void agora.switchCamera()}
             onFullscreen={handleFullscreen}
             onEndLive={() => void handleEnd()}
+            onRetry={agora.retry}
+            onResumePlayback={agora.resumePlayback}
             ending={ending}
             liveEnded={!isLive}
           />

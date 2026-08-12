@@ -11,6 +11,29 @@ import { useAuth } from '../hooks/useAuth'
 import { useChat } from '../hooks/useChat'
 import { useLiveSession } from '../hooks/useLive'
 
+function requestStageFullscreen(node: HTMLDivElement) {
+  if (document.fullscreenElement) {
+    void document.exitFullscreen()
+    return
+  }
+
+  const request = node.requestFullscreen?.bind(node)
+  if (request) {
+    void request().catch(() => {
+      const video = node.querySelector('video') as HTMLVideoElement & {
+        webkitEnterFullscreen?: () => void
+      } | null
+      video?.webkitEnterFullscreen?.()
+    })
+    return
+  }
+
+  const video = node.querySelector('video') as HTMLVideoElement & {
+    webkitEnterFullscreen?: () => void
+  } | null
+  video?.webkitEnterFullscreen?.()
+}
+
 export function CustomerLivePage() {
   const { liveId } = useParams<{ liveId: string }>()
   const { user } = useAuth()
@@ -29,13 +52,7 @@ export function CustomerLivePage() {
   const chat = useChat(isLive ? (liveId ?? null) : null, user?.id ?? null)
 
   const handleFullscreen = useCallback(() => {
-    const node = stageRef.current
-    if (!node) return
-    if (document.fullscreenElement) {
-      void document.exitFullscreen()
-    } else {
-      void node.requestFullscreen()
-    }
+    if (stageRef.current) requestStageFullscreen(stageRef.current)
   }, [])
 
   if (loading) {
@@ -74,6 +91,12 @@ export function CustomerLivePage() {
         </div>
       ) : null}
 
+      {!live.product ? (
+        <div className="mb-4">
+          <Alert>The featured product is no longer available.</Alert>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.95fr)]">
         <div className="space-y-4">
           <div ref={stageRef}>
@@ -82,15 +105,19 @@ export function CustomerLivePage() {
               connecting={agora.connecting}
               connected={agora.connected}
               error={agora.error}
+              warning={agora.warning}
               isHost={false}
               sellerName={live.host?.name}
               viewerCount={agora.viewerCount}
+              reconnecting={agora.reconnecting}
+              needsTapToPlay={agora.needsTapToPlay}
               onFullscreen={handleFullscreen}
+              onRetry={agora.retry}
+              onResumePlayback={agora.resumePlayback}
               liveEnded={!isLive}
             />
           </div>
 
-          {/* Mobile product + chat stack under video */}
           <div className="grid gap-4 lg:hidden">
             {live.product ? (
               <FeaturedProductCard
